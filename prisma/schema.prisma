@@ -30,3 +30,16 @@ model Session {
   collaborator  Boolean?  @default(false)
   emailVerified Boolean?  @default(false)
 }
+model ShopSettings {
+  id              Int      @id @default(autoincrement())
+  shop            String   @unique   // e.g. "my-store.myshopify.com"
+  ga4Id           String?  // G-XXXXXX
+  googleAdsId     String?  // AW-XXXXXX
+  facebookPixelId String?
+  tiktokPixelId   String?
+  pinterestTagId  String?
+  linkedinPid     String?
+  bingUetTagId    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
