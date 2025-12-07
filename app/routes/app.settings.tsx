@@ -1,5 +1,5 @@
-import React from "react";
 import { useLoaderData, Form } from "react-router";
+import type { LoaderFunctionArgs, ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import {
   getShopSettings,
@@ -7,14 +7,14 @@ import {
 } from "../models/shop-settings.server";
 
 // Load existing settings for this shop
-export async function loader({ request }) {
+export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const settings = await getShopSettings(session.shop);
   return { settings };
 }
 
 // Handle form submit (save settings)
-export async function action({ request }) {
+export async function action({ request }: ActionFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const formData = await request.formData();
 
