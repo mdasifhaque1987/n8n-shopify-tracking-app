@@ -9,8 +9,8 @@ generator client {
 // enough when changing adapters.
 // See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
 datasource db {
-  provider = "sqlite"
-  url      = "file:dev.sqlite"
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 model Session {
@@ -31,15 +31,109 @@ model Session {
   emailVerified Boolean?  @default(false)
 }
 model ShopSettings {
-  id              Int      @id @default(autoincrement())
-  shop            String   @unique   // e.g. "my-store.myshopify.com"
-  ga4Id           String?  // G-XXXXXX
-  googleAdsId     String?  // AW-XXXXXX
+  id              Int        @id @default(autoincrement())
+  shop            String     @unique   // e.g. "my-store.myshopify.com"
+  ga4Id           String?    // G-XXXXXX
+  googleAdsId     String?    // AW-XXXXXX
   facebookPixelId String?
   tiktokPixelId   String?
   pinterestTagId  String?
   linkedinPid     String?
   bingUetTagId    String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  workspaceId     String?    // Link to workspace
+  workspace       Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+}
+
+// User model for authentication
+model User {
+  id               String            @id @default(cuid())
+  email            String            @unique
+  passwordHash     String?           // Null for OAuth-only users
+  firebaseUid      String?           @unique // Firebase Authentication UID
+  name             String?
+  role             UserRole          @default(USER)
+  emailVerified    Boolean           @default(false)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  ownedWorkspaces  Workspace[]       @relation("WorkspaceOwner")
+  workspaceMemberships WorkspaceMember[]
+}
+
+// Workspace model for multi-tenancy
+model Workspace {
+  id          String            @id @default(cuid())
+  name        String
+  slug        String            @unique
+  ownerId     String
+  owner       User              @relation("WorkspaceOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+  members     WorkspaceMember[]
+  shopSettings ShopSettings[]
+  platformConnections PlatformConnection[]
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  @@index([ownerId])
+}
+
+// Workspace membership with roles
+model WorkspaceMember {
+  id          String        @id @default(cuid())
+  workspaceId String
+  userId      String
+  role        MemberRole    @default(MEMBER)
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@index([workspaceId])
+}
+
+// Platform OAuth connections (for Phase 2)
+model PlatformConnection {
+  id                String    @id @default(cuid())
+  workspaceId       String
+  workspace         Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  platform          Platform
+  accountId         String    // Platform-specific account ID
+  accountName       String?
+  accessToken       String    // Encrypted
+  refreshToken      String?   // Encrypted
+  tokenExpiresAt    DateTime?
+  scopes            String[]
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@unique([workspaceId, platform, accountId])
+  @@index([workspaceId])
+}
+
+// Enums
+enum UserRole {
+  ADMIN
+  USER
+  VIEWER
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum Platform {
+  GOOGLE_ADS
+  GOOGLE_ANALYTICS
+  META
+  TIKTOK
+  PINTEREST
+  LINKEDIN
+  MICROSOFT_ADS
+  SHOPIFY
 }
