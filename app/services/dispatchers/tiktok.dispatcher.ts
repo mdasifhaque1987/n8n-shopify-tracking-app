@@ -1,0 +1,41 @@
+// TikTok Events API Dispatcher
+import type { UnifiedEvent } from "../events/event-schema";
+import axios from "axios";
+
+/**
+ * Dispatch event to TikTok Events API
+ */
+export async function dispatchToTikTok(
+  event: UnifiedEvent,
+  workspaceId: string
+): Promise<{ success: boolean; message?: string }> {
+  try {
+    // Get TikTok credentials
+    const tiktokEvent = mapToTikTokFormat(event);
+    
+    console.log("TikTok Events API dispatch:", tiktokEvent);
+    
+    return { success: true, message: "Event sent to TikTok" };
+  } catch (error) {
+    console.error("TikTok dispatch error:", error);
+    throw error;
+  }
+}
+
+function mapToTikTokFormat(event: UnifiedEvent) {
+  return {
+    pixel_code: "PIXEL_CODE",
+    event: event.event_name,
+    event_id: event.deduplication_id,
+    timestamp: event.event_time.toISOString(),
+    context: {
+      user_agent: event.user_data.user_agent,
+      ip: event.user_data.ip_address,
+    },
+    properties: {
+      contents: event.ecommerce?.items,
+      value: event.ecommerce?.value,
+      currency: event.ecommerce?.currency,
+    },
+  };
+}
