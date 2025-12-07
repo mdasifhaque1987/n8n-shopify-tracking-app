@@ -40,10 +40,10 @@ export async function action({ request }: ActionFunctionArgs) {
     });
 
     // Create default workspace
-    const slug = email.split("@")[0].replace(/[^a-z0-9]/gi, "-").toLowerCase();
+    const slug = `${email.split("@")[0].replace(/[^a-z0-9]/gi, "-").toLowerCase()}-${crypto.randomUUID().slice(0, 8)}`;
     const workspace = await createWorkspace({
       name: `${name || email}'s Workspace`,
-      slug: `${slug}-${Date.now()}`,
+      slug,
       ownerId: user.id,
     });
 

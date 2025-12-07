@@ -33,13 +33,10 @@ export async function action({ request }: ActionFunctionArgs) {
 
     // Create default workspace if user is new
     if (workspaces.length === 0) {
-      const slug = firebaseToken.email!
-        .split("@")[0]
-        .replace(/[^a-z0-9]/gi, "-")
-        .toLowerCase();
+      const slug = `${firebaseToken.email!.split("@")[0].replace(/[^a-z0-9]/gi, "-").toLowerCase()}-${crypto.randomUUID().slice(0, 8)}`;
       const workspace = await createWorkspace({
         name: `${firebaseToken.name || firebaseToken.email}'s Workspace`,
-        slug: `${slug}-${Date.now()}`,
+        slug,
         ownerId: user.id,
       });
       workspaces = [workspace];

@@ -91,7 +91,7 @@ export async function getUserWorkspaces(userId: string): Promise<Workspace[]> {
     },
   });
 
-  return memberships.map((m) => m.workspace);
+  return memberships.map((m: { workspace: Workspace }) => m.workspace);
 }
 
 /**
@@ -212,14 +212,20 @@ export async function hasWorkspaceRole(
 
 /**
  * Update workspace
+ * Note: Only name and slug can be updated for security
  */
 export async function updateWorkspace(
   id: string,
-  data: Partial<Workspace>
+  data: { name?: string; slug?: string }
 ): Promise<Workspace> {
+  // Only allow updating safe fields
+  const safeData: { name?: string; slug?: string } = {};
+  if (data.name !== undefined) safeData.name = data.name;
+  if (data.slug !== undefined) safeData.slug = data.slug;
+
   return db.workspace.update({
     where: { id },
-    data,
+    data: safeData,
   });
 }
 

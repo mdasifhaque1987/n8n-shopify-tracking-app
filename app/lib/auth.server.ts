@@ -3,7 +3,12 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import type { User } from "@prisma/client";
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback-secret-change-in-production";
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET environment variable is required for authentication");
+}
+
 const JWT_EXPIRES_IN = "7d";
 
 /**
@@ -31,7 +36,7 @@ export function generateToken(user: Pick<User, "id" | "email" | "role">): string
     role: user.role,
   };
 
-  return jwt.sign(payload, JWT_SECRET, {
+  return jwt.sign(payload, JWT_SECRET as string, {
     expiresIn: JWT_EXPIRES_IN,
   });
 }
@@ -45,7 +50,7 @@ export function verifyToken(token: string): {
   role: string;
 } {
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as {
+    const decoded = jwt.verify(token, JWT_SECRET as string) as {
       userId: string;
       email: string;
       role: string;
