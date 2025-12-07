@@ -113,6 +113,19 @@ model PlatformConnection {
   @@index([workspaceId])
 }
 
+// OAuth state for CSRF protection
+model OAuthState {
+  id          String    @id @default(cuid())
+  state       String    @unique
+  workspaceId String
+  platform    Platform
+  expiresAt   DateTime
+  createdAt   DateTime  @default(now())
+
+  @@index([state])
+  @@index([expiresAt])
+}
+
 // Enums
 enum UserRole {
   ADMIN
