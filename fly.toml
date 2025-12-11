@@ -1,0 +1,76 @@
+# Fly.io configuration for Unified Tracking SaaS Platform
+
+app = "dh-tracking-app"
+primary_region = "ewr" # US East (adjust based on your target market)
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = true
+  auto_start_machines = true
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 250
+    soft_limit = 200
+
+[[services]]
+  http_checks = []
+  internal_port = 8080
+  processes = ["app"]
+  protocol = "tcp"
+  script_checks = []
+
+  [services.concurrency]
+    hard_limit = 250
+    soft_limit = 200
+    type = "connections"
+
+  [[services.ports]]
+    force_https = true
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [[services.tcp_checks]]
+    grace_period = "1s"
+    interval = "15s"
+    restart_limit = 0
+    timeout = "2s"
+
+  [[services.http_checks]]
+    interval = 10000
+    grace_period = "5s"
+    method = "get"
+    path = "/healthz"
+    protocol = "http"
+    timeout = 2000
+    tls_skip_verify = false
+
+# VM resources
+[compute]
+  cpu_kind = "shared"
+  cpus = 1
+  memory_mb = 256
+
+# Persistent volume for SQLite (if used as fallback)
+[mounts]
+  source = "data"
+  destination = "/data"
+
+# Metrics
+[metrics]
+  port = 9091
+  path = "/metrics"
