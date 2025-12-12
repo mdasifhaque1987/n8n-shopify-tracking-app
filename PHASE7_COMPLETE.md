@@ -232,9 +232,17 @@ flyctl secrets set SHOPIFY_APP_URL=https://app.yourdomain.com
 - **Google Secret Manager**: ~$0.50/month
 - **Google Cloud Scheduler**: ~$0.30/month
 - **Firebase Auth**: Free (50 users)
-- **Stripe fees**: ~$72/month (50 × $39 × 2.9% + $0.30)
+- **Stripe fees**: ~$35/month (50 × $19.99 × 2.9% + $0.30)
 
-**Total: ~$115/month**
+**Total Cost: ~$77/month**
+**Revenue: $999.50/month** (50 users × $19.99)
+**Net Profit: $922.50/month** (92% margin)
+
+**Pricing Model:**
+- Monthly Plan: $19.99/month
+- Yearly Plan: $12.99/month (billed annually at $155.88/year)  
+- Trial Period: 1 month free (no charge during trial)
+- Billing: After trial period ends
 
 ## Monitoring & Maintenance
 
