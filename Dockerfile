@@ -43,6 +43,7 @@ RUN addgroup --system --gid 1001 nodejs && \
 COPY --from=builder --chown=remix:nodejs /app/public ./public
 COPY --from=builder --chown=remix:nodejs /app/build ./build
 COPY --from=builder --chown=remix:nodejs /app/package.json ./package.json
+COPY --from=builder --chown=remix:nodejs /app/server.js ./server.js
 COPY --from=deps --chown=remix:nodejs /app/node_modules ./node_modules
 COPY --from=builder --chown=remix:nodejs /app/prisma ./prisma
 
