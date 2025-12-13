@@ -35,66 +35,20 @@ export async function action({ request }: ActionFunctionArgs) {
 
   await upsertShopSettings(session.shop, data);
 
+  // React Router will revalidate loader, so we can just return null
   return null;
 }
 
 export default function SettingsPage() {
   const { settings } = useLoaderData();
 
-  const pixelCount = [
-    settings?.ga4Id,
-    settings?.googleAdsId,
-    settings?.facebookPixelId,
-    settings?.tiktokPixelId,
-    settings?.pinterestTagId,
-    settings?.linkedinPid,
-    settings?.bingUetTagId,
-  ].filter(Boolean).length;
-
   return (
     <div style={{ padding: 16, maxWidth: 640 }}>
       <h1>DH Tracking Settings</h1>
       <p>
-        Store all your tracking IDs here. These pixels will automatically be injected
-        into your storefront using our tracking extension.
+        Store all your tracking IDs here. We’ll use these values in your unified
+        tracking pixel later.
       </p>
-
-      {pixelCount > 0 && (
-        <div style={{ 
-          marginTop: 16, 
-          padding: 12, 
-          backgroundColor: '#F0F9FF', 
-          borderRadius: 8,
-          border: '1px solid #BFDBFE',
-          marginBottom: 16,
-        }}>
-          <p style={{ margin: 0, color: '#1E40AF', fontSize: 14 }}>
-            ✓ {pixelCount} pixel{pixelCount > 1 ? 's' : ''} configured
-          </p>
-        </div>
-      )}
-
-      <div style={{ marginBottom: 24 }}>
-        <a
-          href="/app/connections"
-          style={{
-            display: 'inline-block',
-            padding: '8px 16px',
-            backgroundColor: '#4F46E5',
-            color: 'white',
-            textDecoration: 'none',
-            borderRadius: 4,
-            fontSize: 14,
-            fontWeight: 500,
-            marginRight: 8,
-          }}
-        >
-          Connect Platforms via OAuth
-        </a>
-        <span style={{ fontSize: 14, color: '#666' }}>
-          For enhanced tracking and server-side events
-        </span>
-      </div>
 
       <Form method="post">
         <fieldset style={{ border: "none", padding: 0, marginTop: 24 }}>
@@ -198,30 +152,11 @@ export default function SettingsPage() {
             borderRadius: 4,
             border: "none",
             cursor: "pointer",
-            backgroundColor: '#10B981',
-            color: 'white',
-            fontWeight: 500,
           }}
         >
           Save settings
         </button>
       </Form>
-
-      <div style={{ 
-        marginTop: 32, 
-        padding: 16, 
-        backgroundColor: '#FFF7ED', 
-        borderRadius: 8,
-        border: '1px solid #FDBA74'
-      }}>
-        <h3 style={{ margin: '0 0 8px', color: '#EA580C' }}>ℹ️ How it works</h3>
-        <ol style={{ margin: 0, paddingLeft: 20, fontSize: 14, color: '#9A3412' }}>
-          <li>Save your tracking pixel IDs above</li>
-          <li>Enable the DH Tracking Pixel extension in your theme</li>
-          <li>Pixels will automatically load on your storefront</li>
-          <li>Connect platforms via OAuth for enhanced server-side tracking</li>
-        </ol>
-      </div>
     </div>
   );
 }
