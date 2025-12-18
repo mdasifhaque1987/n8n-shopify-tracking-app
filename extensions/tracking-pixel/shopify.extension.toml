@@ -1,9 +1,7 @@
-{
-  "type": "web_pixel_extension",
-  "name": "DH Tracking Pixel",
-  "runtime_context": "strict",
-  "configuration": {
-    "metafields": []
-  },
-  "api_version": "2024-10"
-}
+type = "web_pixel_extension"
+name = "DH Tracking Pixel"
+runtime_context = "strict"
+api_version = "2024-10"
+
+[configuration]
+metafields = []
