@@ -3,5 +3,12 @@ name = "DH Tracking Pixel"
 runtime_context = "strict"
 api_version = "2024-10"
 
+[settings]
+[[settings.fields]]
+key = "account_id"
+type = "single_line_text_field"
+name = "Account ID"
+description = "Your tracking account identifier"
+
 [configuration]
 metafields = []
