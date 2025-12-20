@@ -5,6 +5,8 @@ runtime_context = "strict"
 api_version = "2024-10"
 
 [settings]
+type = "object"
+
 [[settings.fields]]
 key = "account_id"
 type = "single_line_text_field"
