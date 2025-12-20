@@ -3,3 +3,9 @@ type = "web_pixel_extension"
 name = "DH Tracking Pixel"
 runtime_context = "strict"
 api_version = "2024-10"
+
+[customer_privacy]
+analytics = true
+marketing = true
+preferences = false
+sale_of_data = "enabled"
