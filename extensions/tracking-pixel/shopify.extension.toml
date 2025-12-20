@@ -3,12 +3,3 @@ type = "web_pixel_extension"
 name = "DH Tracking Pixel"
 runtime_context = "strict"
 api_version = "2024-10"
-
-[settings]
-type = "object"
-
-[[settings.fields]]
-key = "account_id"
-type = "single_line_text_field"
-name = "Account ID"
-description = "Your tracking account identifier"
