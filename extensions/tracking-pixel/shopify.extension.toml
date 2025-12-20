@@ -1,7 +1,8 @@
 api_version = "2024-10"
 
-[[runtime_configuration_definition]]
+[runtime_configuration_definition]
 type = "object"
+properties = {}
 
 [[extensions]]
 name = "DH Tracking Pixel"
