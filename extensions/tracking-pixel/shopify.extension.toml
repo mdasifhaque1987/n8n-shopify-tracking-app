@@ -1,15 +1,15 @@
 api_version = "2024-10"
 
-[runtime_configuration_definition]
-type = "object"
-properties = {}
-
 [[extensions]]
 name = "DH Tracking Pixel"
 handle = "dh-tracking-pixel"
 type = "web_pixel_extension"
 uid = "2d8efb00-bc5c-7ff2-116f-fca9847eb326644cbcd1"
 runtime_context = "strict"
+
+[[extensions.runtime_configuration_definition]]
+type = "object"
+properties = {}
 
 [extensions.settings]
 
