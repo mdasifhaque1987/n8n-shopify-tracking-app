@@ -12,6 +12,7 @@ export async function saveGa4DeliverySettings(data: {
   testCode?: string;
 }) {
   const serverMode = data.deliveryMode === "server";
+  const assetName = data.propertyId || data.measurementId;
 
   const setting = await db.platformDeliverySetting.upsert({
     where: {
@@ -38,6 +39,18 @@ export async function saveGa4DeliverySettings(data: {
     },
   });
 
+  const credentialUpdate = {
+    assetName,
+    testCode: data.testCode,
+    isActive: true,
+    ...(serverMode && data.apiSecret
+      ? {
+          apiSecret: encryptToken(data.apiSecret),
+          tokenStatus: "configured",
+        }
+      : {}),
+  };
+
   const credential = await db.platformServerCredential.upsert({
     where: {
       workspaceId_platform_assetType_assetId: {
@@ -47,19 +60,13 @@ export async function saveGa4DeliverySettings(data: {
         assetId: data.measurementId,
       },
     },
-    update: {
-      assetName: data.propertyId || data.measurementId,
-      apiSecret: serverMode && data.apiSecret ? encryptToken(data.apiSecret) : undefined,
-      tokenStatus: serverMode && data.apiSecret ? "configured" : "not_configured",
-      testCode: data.testCode,
-      isActive: true,
-    },
+    update: credentialUpdate,
     create: {
       workspaceId: data.workspaceId,
       platform: PLATFORM,
       assetType: "ga4_measurement",
       assetId: data.measurementId,
-      assetName: data.propertyId || data.measurementId,
+      assetName,
       apiSecret: serverMode && data.apiSecret ? encryptToken(data.apiSecret) : null,
       tokenStatus: serverMode && data.apiSecret ? "configured" : "not_configured",
       testCode: data.testCode,
@@ -97,7 +104,10 @@ export async function getGa4DeliverySettings(workspaceId: string, includeSecret 
     credential: credential
       ? {
           ...credential,
-          apiSecret: includeSecret && credential.apiSecret ? decryptToken(credential.apiSecret) : undefined,
+          apiSecret:
+            includeSecret && credential.apiSecret
+              ? decryptToken(credential.apiSecret)
+              : undefined,
         }
       : null,
   };
