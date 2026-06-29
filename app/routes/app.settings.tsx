@@ -15,6 +15,7 @@ import {
 } from "../services/platform-connection.server";
 import {
   getGoogleAnalyticsProperties,
+  getGoogleAnalyticsDataStreams,
   getGoogleAdsAccounts,
   getMerchantCenters,
 } from "../services/oauth/google.server";
@@ -30,6 +31,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const savedConnections = await getWorkspaceConnections(workspace.id);
   const savedAssetSelections = await getAssetSelections(workspace.id);
   const ga4DeliverySettings = await getGa4DeliverySettings(workspace.id);
+  const savedGa4PropertyId = savedAssetSelections["google:GA4 Property"] || "";
 
   const getStatus = (platform: string) => {
     const connection = savedConnections.find(
@@ -46,12 +48,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const assets: {
     google: {
       ga4Properties: AssetOption[];
+      ga4DataStreams: AssetOption[];
       googleAdsAccounts: AssetOption[];
       merchantCenters: AssetOption[];
     };
   } = {
     google: {
       ga4Properties: [],
+      ga4DataStreams: [],
       googleAdsAccounts: [],
       merchantCenters: [],
     },
@@ -81,6 +85,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
         value: property.propertyId,
         label: `${property.displayName} (${property.propertyId})`,
       }));
+
+      if (savedGa4PropertyId) {
+        const ga4DataStreams = await getGoogleAnalyticsDataStreams(
+          decryptedGoogleConnection.decryptedAccessToken,
+          savedGa4PropertyId
+        );
+
+        assets.google.ga4DataStreams = ga4DataStreams.map((stream) => ({
+          value: stream.measurementId,
+          label: `${stream.displayName} (${stream.measurementId})`,
+        }));
+      }
 
       assets.google.googleAdsAccounts = googleAdsAccounts.map((account) => ({
         value: account.customerId,
@@ -151,7 +167,6 @@ export async function action({ request }: ActionFunctionArgs) {
     const rawDeliveryMode = String(formData.get("deliveryMode") || "client");
     const deliveryMode = rawDeliveryMode === "server" ? "server" : "client";
     const apiSecret = String(formData.get("apiSecret") || "").trim();
-    const testCode = String(formData.get("testCode") || "").trim();
 
     if (!propertyId) {
       return Response.json(
@@ -186,7 +201,6 @@ export async function action({ request }: ActionFunctionArgs) {
       measurementId,
       deliveryMode,
       apiSecret: apiSecret || undefined,
-      testCode: testCode || undefined,
     });
 
     return Response.json({
@@ -335,7 +349,7 @@ const platformConfigs = [
 
 export default function ConfigurationPage() {
   const { shop, connections, assets, savedAssetSelections, ga4DeliverySettings } = useLoaderData<typeof loader>();
-  const [activeModal, setActiveModal] = useState<"conversions" | "feed" | null>(null);
+  const [activeModal, setActiveModal] = useState<"ga4" | "conversions" | "feed" | null>(null);
   const conversionFetcher = useFetcher();
   const conversionResult = conversionFetcher.data as
     | { ok?: boolean; error?: string; message?: string }
@@ -501,175 +515,89 @@ export default function ConfigurationPage() {
                         const options = getFieldOptions(platform.key, field);
 
                         return (
-                          <label key={field} style={styles.label}>
-                            {field}
-                            <select
-                              value={selectedAssets[key] || ""}
-                              onChange={(event) => {
-                                const selectedValue = event.target.value;
-                                const selectedLabel =
-                                  event.currentTarget.options[event.currentTarget.selectedIndex]?.text || "";
+                          <div key={field} style={styles.assetFieldBlock}>
+                            <label style={styles.label}>
+                              {field}
+                              <select
+                                value={selectedAssets[key] || ""}
+                                onChange={(event) => {
+                                  const selectedValue = event.target.value;
+                                  const selectedLabel =
+                                    event.currentTarget.options[event.currentTarget.selectedIndex]?.text || "";
 
-                                setSelectedAssets((previous) => ({
-                                  ...previous,
-                                  [key]: selectedValue,
-                                }));
+                                  setSelectedAssets((previous) => ({
+                                    ...previous,
+                                    [key]: selectedValue,
+                                  }));
 
-                                if (selectedValue) {
-                                  assetSelectionFetcher.submit(
-                                    {
-                                      _action: "save_asset_selection",
-                                      platform: platform.key,
-                                      assetType: field,
-                                      assetValue: selectedValue,
-                                      assetLabel: selectedLabel,
-                                    },
-                                    { method: "post" }
-                                  );
-                                }
-                              }}
-                              style={styles.select}
-                            >
-                              <option value="">
-                                {options.length ? `Select ${field}` : getEmptyOptionText(platform.key, field)}
-                              </option>
+                                  if (selectedValue) {
+                                    assetSelectionFetcher.submit(
+                                      {
+                                        _action: "save_asset_selection",
+                                        platform: platform.key,
+                                        assetType: field,
+                                        assetValue: selectedValue,
+                                        assetLabel: selectedLabel,
+                                      },
+                                      { method: "post" }
+                                    );
 
-                              {options.map((option) => (
-                                <option key={option.value} value={option.value}>
-                                  {option.label}
+                                    if (platform.key === "google" && field === "GA4 Property") {
+                                      setTimeout(() => window.location.reload(), 700);
+                                    }
+                                  }
+                                }}
+                                style={styles.select}
+                              >
+                                <option value="">
+                                  {options.length ? `Select ${field}` : getEmptyOptionText(platform.key, field)}
                                 </option>
-                              ))}
-                            </select>
-                          </label>
+
+                                {options.map((option) => (
+                                  <option key={option.value} value={option.value}>
+                                    {option.label}
+                                  </option>
+                                ))}
+                              </select>
+                            </label>
+
+                            {platform.key === "google" && field === "GA4 Property" && (
+                              <button
+                                type="button"
+                                style={selectedAssets[key] ? styles.inlineActionButton : styles.disabledButton}
+                                disabled={!selectedAssets[key]}
+                                onClick={() => setActiveModal("ga4")}
+                              >
+                                Configuration
+                              </button>
+                            )}
+
+                            {platform.key === "google" && field === "Google Ads Account / Manager Account" && (
+                              <button
+                                type="button"
+                                style={selectedAssets[key] ? styles.inlineActionButton : styles.disabledButton}
+                                disabled={!selectedAssets[key]}
+                                onClick={() => setActiveModal("conversions")}
+                              >
+                                Conversions
+                              </button>
+                            )}
+
+                            {platform.key === "google" && field === "Google Merchant Center" && (
+                              <button
+                                type="button"
+                                style={selectedAssets[key] ? styles.inlineActionButton : styles.disabledButton}
+                                disabled={!selectedAssets[key]}
+                                onClick={() => setActiveModal("feed")}
+                              >
+                                Create Feed
+                              </button>
+                            )}
+                          </div>
                         );
                       })}
                     </div>
 
-                    {platform.key === "google" && (
-                      <div style={styles.googleActions}>
-                        <div style={styles.actionCard}>
-                          <h4 style={styles.actionTitle}>GA4 Delivery Settings</h4>
-                          <p style={styles.actionText}>
-                            Default is client-side. Server-side GA4 requires a Measurement Protocol API Secret.
-                          </p>
-
-                          <ga4DeliveryFetcher.Form method="post" style={{ display: "grid", gap: 10 }}>
-                            <input type="hidden" name="_action" value="save_ga4_delivery_settings" />
-                            <input type="hidden" name="propertyId" value={ga4PropertyValue} />
-
-                            <label style={styles.label}>
-                              Selected GA4 Property
-                              <input
-                                style={styles.input}
-                                value={ga4PropertyValue || "Select GA4 Property above first"}
-                                readOnly
-                              />
-                            </label>
-
-                            <label style={styles.label}>
-                              GA4 Measurement ID
-                              <input
-                                style={styles.input}
-                                name="measurementId"
-                                placeholder="Example: G-XXXXXXXXXX"
-                                defaultValue={ga4DeliverySettings?.credential?.assetId || ""}
-                              />
-                            </label>
-
-                            <label style={styles.label}>
-                              Delivery Mode
-                              <select
-                                style={styles.select}
-                                name="deliveryMode"
-                                value={ga4DeliveryMode}
-                                onChange={(event) => setGa4DeliveryMode(event.target.value)}
-                              >
-                                <option value="client">Client-side only</option>
-                                <option value="server">Server-side only</option>
-                              </select>
-                            </label>
-
-                            {ga4DeliveryMode === "server" && (
-                              <label style={styles.label}>
-                                GA4 API Secret
-                                <input
-                                  style={styles.input}
-                                  name="apiSecret"
-                                  type="password"
-                                  placeholder={
-                                    ga4DeliverySettings?.credential?.tokenStatus === "configured"
-                                      ? "Already saved. Leave blank to keep existing secret."
-                                      : "Paste GA4 Measurement Protocol API Secret"
-                                  }
-                                />
-                              </label>
-                            )}
-
-                            <label style={styles.label}>
-                              Test Code / Debug Label
-                              <input
-                                style={styles.input}
-                                name="testCode"
-                                placeholder="Optional test label"
-                                defaultValue={ga4DeliverySettings?.setting?.testCode || ""}
-                              />
-                            </label>
-
-                            {ga4DeliveryResult?.ok && (
-                              <div style={styles.successBox}>
-                                {ga4DeliveryResult.message || "GA4 settings saved."}
-                              </div>
-                            )}
-
-                            {ga4DeliveryResult?.error && (
-                              <div style={styles.errorBox}>
-                                {ga4DeliveryResult.error}
-                              </div>
-                            )}
-
-                            <button
-                              type="submit"
-                              style={ga4PropertyValue ? styles.primaryButton : styles.disabledButton}
-                              disabled={!ga4PropertyValue || ga4DeliveryFetcher.state !== "idle"}
-                            >
-                              {ga4DeliveryFetcher.state === "idle"
-                                ? "Save GA4 Delivery Settings"
-                                : "Saving..."}
-                            </button>
-                          </ga4DeliveryFetcher.Form>
-                        </div>
-
-                        <div style={styles.actionCard}>
-                          <h4 style={styles.actionTitle}>Google Ads Conversions</h4>
-                          <p style={styles.actionText}>
-                            Select a Google Ads account first, then select or create default/custom conversions.
-                          </p>
-                          <button
-                            type="button"
-                            style={googleAdsAccountValue ? styles.primaryButton : styles.disabledButton}
-                            disabled={!googleAdsAccountValue}
-                            onClick={() => setActiveModal("conversions")}
-                          >
-                            Conversions
-                          </button>
-                        </div>
-
-                        <div style={styles.actionCard}>
-                          <h4 style={styles.actionTitle}>Merchant Center Feed</h4>
-                          <p style={styles.actionText}>
-                            Select Merchant Center first, then configure product ID format, country feed, category feed, or selected product feed.
-                          </p>
-                          <button
-                            type="button"
-                            style={merchantCenterValue ? styles.primaryButton : styles.disabledButton}
-                            disabled={!merchantCenterValue}
-                            onClick={() => setActiveModal("feed")}
-                          >
-                            Create Feed
-                          </button>
-                        </div>
-                      </div>
-                    )}
                   </>
                 )}
               </article>
@@ -695,6 +623,108 @@ export default function ConfigurationPage() {
           </div>
         </div>
       </section>
+
+      {activeModal === "ga4" && (
+        <Modal title="GA4 Configuration" onClose={() => setActiveModal(null)}>
+          <ga4DeliveryFetcher.Form method="post" style={styles.modalGrid}>
+            <input type="hidden" name="_action" value="save_ga4_delivery_settings" />
+            <input type="hidden" name="propertyId" value={ga4PropertyValue} />
+
+            <label style={styles.label}>
+              Selected GA4 Property
+              <input
+                style={styles.input}
+                value={ga4PropertyValue || "Select GA4 Property first"}
+                readOnly
+              />
+            </label>
+
+            {assets.google.ga4DataStreams.length > 0 ? (
+              <label style={styles.label}>
+                GA4 Data Stream / Measurement ID
+                <select
+                  style={styles.select}
+                  name="measurementId"
+                  defaultValue={ga4DeliverySettings?.credential?.assetId || ""}
+                >
+                  <option value="">Select Measurement ID</option>
+                  {assets.google.ga4DataStreams.map((stream) => (
+                    <option key={stream.value} value={stream.value}>
+                      {stream.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label style={styles.label}>
+                GA4 Measurement ID
+                <input
+                  style={styles.input}
+                  name="measurementId"
+                  placeholder="Example: G-XXXXXXXXXX"
+                  defaultValue={ga4DeliverySettings?.credential?.assetId || ""}
+                />
+              </label>
+            )}
+
+            <label style={styles.label}>
+              Delivery Mode
+              <select
+                style={styles.select}
+                name="deliveryMode"
+                value={ga4DeliveryMode}
+                onChange={(event) => setGa4DeliveryMode(event.target.value)}
+              >
+                <option value="client">Client-side only</option>
+                <option value="server">Server-side only</option>
+              </select>
+            </label>
+
+            {ga4DeliveryMode === "server" && (
+              <label style={styles.label}>
+                GA4 API Secret
+                <input
+                  style={styles.input}
+                  name="apiSecret"
+                  type="password"
+                  placeholder={
+                    ga4DeliverySettings?.credential?.tokenStatus === "configured"
+                      ? "Already saved. Leave blank to keep existing secret."
+                      : "Paste GA4 Measurement Protocol API Secret"
+                  }
+                />
+              </label>
+            )}
+
+            {ga4DeliveryResult?.ok && (
+              <div style={styles.successBox}>
+                {ga4DeliveryResult.message || "GA4 settings saved."}
+              </div>
+            )}
+
+            {ga4DeliveryResult?.error && (
+              <div style={styles.errorBox}>
+                {ga4DeliveryResult.error}
+              </div>
+            )}
+
+            <div style={styles.modalActions}>
+              <button type="button" style={styles.secondaryButton} onClick={() => setActiveModal(null)}>
+                Cancel
+              </button>
+              <button
+                type="submit"
+                style={ga4PropertyValue ? styles.primaryButton : styles.disabledButton}
+                disabled={!ga4PropertyValue || ga4DeliveryFetcher.state !== "idle"}
+              >
+                {ga4DeliveryFetcher.state === "idle"
+                  ? "Save GA4 Configuration"
+                  : "Saving..."}
+              </button>
+            </div>
+          </ga4DeliveryFetcher.Form>
+        </Modal>
+      )}
 
       {activeModal === "conversions" && (
         <Modal title="Google Ads Conversion Configuration" onClose={() => setActiveModal(null)}>
@@ -1077,6 +1107,21 @@ const styles = {
     flexWrap: "wrap",
     marginTop: 16,
   },
+  assetFieldBlock: {
+    display: "grid",
+    gap: 8,
+  },
+  inlineActionButton: {
+    width: "fit-content",
+    background: "#2563eb",
+    color: "#fff",
+    border: 0,
+    borderRadius: 10,
+    padding: "9px 14px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+
   googleActions: {
     display: "grid",
     gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
