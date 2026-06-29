@@ -19,6 +19,7 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/analytics.readonly", // GA4
   "https://www.googleapis.com/auth/userinfo.email", // Email
   "https://www.googleapis.com/auth/userinfo.profile", // Profile
+  "https://www.googleapis.com/auth/content", // Merchant Center / Shopping Content API
 ];
 
 /**
@@ -76,9 +77,7 @@ export async function exchangeGoogleCode(code: string): Promise<{
     const userInfo = await oauth2.userinfo.get();
 
     // Calculate expiration
-    const expiresAt = new Date(
-      Date.now() + (tokens.expiry_date || Date.now() + 3600 * 1000)
-    );
+    const expiresAt = new Date(tokens.expiry_date || Date.now() + 3600 * 1000);
 
     return {
       accessToken: tokens.access_token,
@@ -86,9 +85,16 @@ export async function exchangeGoogleCode(code: string): Promise<{
       expiresAt,
       email: userInfo.data.email || "",
     };
-  } catch (error) {
+  } catch (error: any) {
     console.error("Error exchanging Google code:", error);
-    throw new Error("Failed to exchange authorization code");
+
+    const details =
+      error?.response?.data?.error_description ||
+      error?.response?.data?.error ||
+      error?.message ||
+      "Unknown Google token exchange error";
+
+    throw new Error(`Failed to exchange authorization code: ${details}`);
   }
 }
 
@@ -141,16 +147,103 @@ export async function refreshGoogleToken(
 /**
  * Get Google Ads accounts for a user
  */
-export async function getGoogleAdsAccounts(): Promise<
+export async function getGoogleAdsAccounts(
+  accessToken: string
+): Promise<
   Array<{
     customerId: string;
     descriptiveName: string;
   }>
 > {
-  // Note: This requires Google Ads API which needs separate setup
-  // For now, return empty array - will be implemented in full integration
-  console.warn("Google Ads API integration pending");
-  return [];
+  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+  const apiVersion = process.env.GOOGLE_ADS_API_VERSION || "v24";
+
+  if (!developerToken) {
+    console.warn("GOOGLE_ADS_DEVELOPER_TOKEN is missing");
+    return [];
+  }
+
+  try {
+    const response = await fetch(
+      `https://googleads.googleapis.com/${apiVersion}/customers:listAccessibleCustomers`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "developer-token": developerToken,
+        },
+      }
+    );
+
+    const data: any = await response.json();
+
+    if (!response.ok) {
+      console.error("Google Ads accounts error:", data);
+      return [];
+    }
+
+    const resourceNames: string[] = data.resourceNames || [];
+
+    return resourceNames.map((resourceName) => {
+      const customerId = resourceName.replace("customers/", "");
+
+      return {
+        customerId,
+        descriptiveName: `Google Ads Account ${customerId}`,
+      };
+    });
+  } catch (error) {
+    console.error("Error getting Google Ads accounts:", error);
+    return [];
+  }
+}
+
+export async function getMerchantCenters(
+  accessToken: string
+): Promise<
+  Array<{
+    merchantId: string;
+    name: string;
+  }>
+> {
+  try {
+    const response = await fetch(
+      "https://shoppingcontent.googleapis.com/content/v2.1/accounts/authinfo",
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    const data: any = await response.json();
+
+    if (!response.ok) {
+      console.error("Merchant Center authinfo error:", data);
+      return [];
+    }
+
+    const accountIdentifiers = data.accountIdentifiers || [];
+
+    return accountIdentifiers
+      .map((account: any) => {
+        const merchantId =
+          account.merchantId ||
+          account.aggregatorId ||
+          account.accountId ||
+          "";
+
+        return {
+          merchantId: String(merchantId),
+          name: `Merchant Center ${merchantId}`,
+        };
+      })
+      .filter((account: { merchantId: string }) => account.merchantId);
+  } catch (error) {
+    console.error("Error getting Merchant Centers:", error);
+    return [];
+  }
 }
 
 /**
@@ -198,6 +291,55 @@ export async function getGoogleAnalyticsProperties(
     return properties;
   } catch (error) {
     console.error("Error getting Analytics properties:", error);
+    return [];
+  }
+}
+
+
+export type Ga4DataStreamOption = {
+  streamId: string;
+  displayName: string;
+  measurementId: string;
+  propertyId: string;
+};
+
+export async function getGoogleAnalyticsDataStreams(
+  accessToken: string,
+  propertyId: string
+): Promise<Ga4DataStreamOption[]> {
+  const cleanPropertyId = String(propertyId || "").replace(/^properties\//, "").trim();
+
+  if (!cleanPropertyId) {
+    return [];
+  }
+
+  try {
+    const response = await fetch(
+      `https://analyticsadmin.googleapis.com/v1beta/properties/${cleanPropertyId}/dataStreams`,
+      {
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.warn("GA4 data streams API failed", response.status, await response.text());
+      return [];
+    }
+
+    const data = await response.json();
+
+    return (data.dataStreams || [])
+      .filter((stream: any) => stream.type === "WEB_DATA_STREAM" && stream.webStreamData?.measurementId)
+      .map((stream: any) => ({
+        streamId: String(stream.name || "").split("/").pop() || stream.name,
+        displayName: stream.displayName || stream.webStreamData?.defaultUri || stream.name,
+        measurementId: stream.webStreamData.measurementId,
+        propertyId: cleanPropertyId,
+      }));
+  } catch (error) {
+    console.warn("Failed to load GA4 data streams", error);
     return [];
   }
 }
