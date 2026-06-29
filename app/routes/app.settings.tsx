@@ -1,17 +1,19 @@
+import { resolveGoogleAccessToken } from "../services/google-token.server";
 import { useState } from "react";
-import type { ReactNode } from "react";
 import { useFetcher, useLoaderData } from "react-router";
-import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { authenticate } from "../shopify.server";
-import { saveGoogleConversionConfig } from "../services/google-conversion-config.server";
-import { saveAssetSelection, getAssetSelections } from "../services/asset-selection.server";
+import { getGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
+import { saveGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
 import { createOrReuseGoogleAdsConversionAction } from "../services/google-ads-conversion-action.server";
 import { saveGoogleAdsConversionAction } from "../services/google-ads-conversion-action-map.server";
-import { saveGa4DeliverySettings, getGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
+import { saveGoogleConversionConfig } from "../services/google-conversion-config.server";
+import { getAssetSelections } from "../services/asset-selection.server";
+import { saveAssetSelection } from "../services/asset-selection.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
+import { authenticate } from "../shopify.server";
 import {
   getPlatformConnection,
   getWorkspaceConnections,
+  getGooglePlatformConnection,
 } from "../services/platform-connection.server";
 import {
   getGoogleAnalyticsProperties,
@@ -214,39 +216,44 @@ export async function action({ request }: ActionFunctionArgs) {
     const setupType = String(formData.get("setupType") || "default");
     const conversionName = String(formData.get("conversionName") || "");
     const conversionValueMode = String(formData.get("conversionValueMode") || "dynamic");
+    const rawDeliveryMode = String(formData.get("deliveryMode") || "client");
+    const deliveryMode = rawDeliveryMode === "server" ? "server" : "client";
     const events = formData.getAll("events").map((event) => String(event));
 
     if (!googleAdsCustomerId) {
       return Response.json(
-        { ok: false, error: "Google Ads account is required" },
+        { ok: false, error: "Please select a Google Ads account first." },
         { status: 400 }
       );
     }
 
     if (!events.length) {
       return Response.json(
-        { ok: false, error: "Select at least one conversion event" },
+        { ok: false, error: "Please select at least one conversion event." },
         { status: 400 }
       );
     }
 
-    const savedConnections = await getWorkspaceConnections(workspace.id);
-    const googleConnection = savedConnections.find(
-      (item) => item.platform === "GOOGLE_ADS" && item.isActive
-    );
+    const googleConnection = await getGooglePlatformConnection(workspace.id);
 
     if (!googleConnection) {
       return Response.json(
-        { ok: false, error: "Google account is not connected" },
+        { ok: false, error: "Google is not connected." },
         { status: 400 }
       );
     }
 
-    const decryptedGoogleConnection = await getPlatformConnection(googleConnection.id);
+    let googleAccessToken = "";
 
-    if (!decryptedGoogleConnection?.decryptedAccessToken) {
+    try {
+      googleAccessToken = await resolveGoogleAccessToken(googleConnection);
+    } catch (error) {
       return Response.json(
-        { ok: false, error: "Google access token is missing" },
+        {
+          ok: false,
+          error: "Google access token could not be decrypted/refreshed. Please reconnect Google if needed.",
+          details: error instanceof Error ? error.message : String(error),
+        },
         { status: 400 }
       );
     }
@@ -254,27 +261,43 @@ export async function action({ request }: ActionFunctionArgs) {
     const createdActions = [];
 
     for (const eventName of events) {
-      const action = await createOrReuseGoogleAdsConversionAction({
-        accessToken: decryptedGoogleConnection.decryptedAccessToken,
-        customerId: googleAdsCustomerId,
-        eventName,
-        baseName: conversionName,
-        conversionValueMode,
-      });
+      try {
+        const action = await createOrReuseGoogleAdsConversionAction({
+          accessToken: googleAccessToken,
+          customerId: googleAdsCustomerId,
+          eventName,
+          baseName: setupType === "custom" ? conversionName : undefined,
+          conversionValueMode,
+        });
 
-      await saveGoogleAdsConversionAction({
-        workspaceId: workspace.id,
-        googleAdsCustomerId,
-        eventName,
-        conversionName: action.name || eventName,
-        conversionActionId: action.id ? String(action.id) : undefined,
-        resourceName: action.resourceName,
-        category: eventName,
-        reused: Boolean(action.reused),
-        deliveryMode,
-      });
+        await saveGoogleAdsConversionAction({
+          workspaceId: workspace.id,
+          googleAdsCustomerId,
+          eventName,
+          conversionName: action.name || eventName,
+          conversionActionId: action.id ? String(action.id) : undefined,
+          conversionId: action.conversionId,
+          conversionLabel: action.conversionLabel,
+          resourceName: action.resourceName,
+          category: eventName,
+          reused: Boolean(action.reused),
+          deliveryMode,
+        });
 
-      createdActions.push(action);
+        createdActions.push(action);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+
+        return Response.json(
+          {
+            ok: false,
+            error:
+              "Google Ads automatic conversion creation failed. Please check Google Ads account access, manager account login-customer-id, developer token access, and OAuth permissions.",
+            details: message,
+          },
+          { status: 400 }
+        );
+      }
     }
 
     await saveGoogleConversionConfig({
@@ -288,10 +311,11 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return Response.json({
       ok: true,
-      message: `Saved and created/reused ${createdActions.length} Google Ads conversion action(s).`,
-      createdActions,
+      message: "Saved and created/reused Google Ads conversion action(s).",
+      actions: createdActions,
     });
   }
+
 
   return Response.json({ ok: false, error: "Unknown action" }, { status: 400 });
 }

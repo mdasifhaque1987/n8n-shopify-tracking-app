@@ -3,6 +3,7 @@ import { register } from "@shopify/web-pixels-extension";
 const CONFIG_URL = "https://tracking.datahatches.com/api/pixel-config";
 const TRACK_URL = "https://tracking.datahatches.com/api/events/track";
 const GA4_COLLECT_URL = "https://www.google-analytics.com/g/collect";
+const GOOGLE_ADS_CONVERSION_URL = "https://www.googleadservices.com/pagead/conversion";
 
 let cachedConfig = null;
 
@@ -239,6 +240,83 @@ function buildGa4Url(payload, measurementId) {
   return `${GA4_COLLECT_URL}?${params.toString()}`;
 }
 
+
+
+function mapGoogleAdsEventName(payload) {
+  const map = {
+    page_view: "PAGE_VIEW",
+    view_item: "VIEW_ITEM",
+    view_item_list: "VIEW_ITEM_LIST",
+    add_to_cart: "ADD_TO_CART",
+    begin_checkout: "BEGIN_CHECKOUT",
+    purchase: "PURCHASE",
+    generate_lead: "LEAD",
+    sign_up: "SUBSCRIBE",
+  };
+
+  return map[payload.ga4_event] || map[payload.original_event] || String(payload.ga4_event || "").toUpperCase();
+}
+
+function buildGoogleAdsUrl(payload, conversion) {
+  const conversionId = String(conversion.conversionId || "").replace(/^AW-/, "");
+  const label = conversion.conversionLabel;
+
+  const params = new URLSearchParams();
+
+  params.set("label", label);
+  params.set("guid", "ON");
+  params.set("script", "0");
+
+  if (payload.value !== undefined && payload.value !== null) {
+    params.set("value", String(payload.value));
+  }
+
+  if (payload.currency) {
+    params.set("currency_code", String(payload.currency));
+  }
+
+  if (payload.transaction_id) {
+    params.set("transaction_id", String(payload.transaction_id));
+  }
+
+  return `${GOOGLE_ADS_CONVERSION_URL}/${encodeURIComponent(conversionId)}/?${params.toString()}`;
+}
+
+function sendToGoogleAds(payload, config) {
+  try {
+    const googleAdsConfig = config?.googleAds;
+
+    if (!googleAdsConfig?.enabled) {
+      console.log("[DH Tracking Pixel] Google Ads skipped - not enabled", googleAdsConfig);
+      return;
+    }
+
+    const eventName = mapGoogleAdsEventName(payload);
+    const conversion = googleAdsConfig.conversions?.[eventName];
+
+    if (!conversion?.conversionId || !conversion?.conversionLabel) {
+      console.log("[DH Tracking Pixel] Google Ads skipped - missing conversion", {
+        eventName,
+        available: Object.keys(googleAdsConfig.conversions || {}),
+        missingLabels: googleAdsConfig.missingLabels || [],
+      });
+      return;
+    }
+
+    const url = buildGoogleAdsUrl(payload, conversion);
+
+    fetch(url, {
+      method: "GET",
+      mode: "no-cors",
+      keepalive: true,
+    });
+
+    console.log("[DH Tracking Pixel] Google Ads sent", eventName, conversion.conversionId, conversion.conversionLabel);
+  } catch (e) {
+    console.log("[DH Tracking Pixel] Google Ads send error", e);
+  }
+}
+
 function sendToGa4(payload, config) {
   try {
     const measurementId =
@@ -301,6 +379,7 @@ register(({ analytics }) => {
 
         sendToServer(payload);
         sendToGa4(payload, config);
+        sendToGoogleAds(payload, config);
       } catch (e) {
         console.log("[DH Tracking Pixel Error]", eventName, e);
       }

@@ -1,1 +1,1 @@
-export { loader, action } from "../../api.pixel-config";
+export { loader, action } from "../api.pixel-config";

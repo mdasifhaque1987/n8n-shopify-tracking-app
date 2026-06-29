@@ -32,7 +32,31 @@ export async function createPlatformConnection(
     ? encryptToken(data.refreshToken)
     : null;
 
-  const connection = await db.platformConnection.create({
+  const existing = await db.platformConnection.findUnique({
+    where: {
+      workspaceId_platform_accountId: {
+        workspaceId: data.workspaceId,
+        platform: data.platform,
+        accountId: data.accountId,
+      },
+    },
+  });
+
+  if (existing) {
+    return db.platformConnection.update({
+      where: { id: existing.id },
+      data: {
+        accountName: data.accountName,
+        accessToken: encryptedAccessToken,
+        refreshToken: encryptedRefreshToken || existing.refreshToken,
+        tokenExpiresAt: data.tokenExpiresAt,
+        scopes: data.scopes,
+        isActive: true,
+      },
+    });
+  }
+
+  return db.platformConnection.create({
     data: {
       workspaceId: data.workspaceId,
       platform: data.platform,
@@ -45,8 +69,6 @@ export async function createPlatformConnection(
       isActive: true,
     },
   });
-
-  return connection;
 }
 
 /**
@@ -168,4 +190,41 @@ export async function getConnectionByAccount(
       },
     },
   });
+}
+
+
+export async function getGooglePlatformConnection(workspaceId: string) {
+  const isGooglePlatform = (platform: unknown) => {
+    const value = String(platform || "").toUpperCase();
+    return value === "GOOGLE" || value === "GOOGLE_ADS";
+  };
+
+  const workspaceConnections = await db.platformConnection.findMany({
+    where: {
+      workspaceId,
+      isActive: true,
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+  });
+
+  const workspaceGoogleConnection = workspaceConnections.find((connection) =>
+    isGooglePlatform(connection.platform)
+  );
+
+  if (workspaceGoogleConnection) {
+    return workspaceGoogleConnection;
+  }
+
+  const activeConnections = await db.platformConnection.findMany({
+    where: {
+      isActive: true,
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+  });
+
+  return activeConnections.find((connection) => isGooglePlatform(connection.platform)) || null;
 }
