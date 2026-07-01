@@ -108,6 +108,239 @@ function safeString(value) {
   return String(value);
 }
 
+const ATTRIBUTION_STORAGE_KEY = "dh_tracking_attribution";
+
+const CLICK_ID_KEYS = [
+  "gclid",
+  "gbraid",
+  "wbraid",
+  "msclkid",
+  "fbclid",
+  "ttclid",
+  "epik",
+];
+
+function getUrlParam(url, key) {
+  try {
+    return new URL(url).searchParams.get(key) || undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+
+async function readBrowserLocalStorage(browser, key) {
+  try {
+    if (
+      browser &&
+      browser.localStorage &&
+      typeof browser.localStorage.getItem === "function"
+    ) {
+      return await browser.localStorage.getItem(key);
+    }
+  } catch (e) {}
+
+  return undefined;
+}
+
+async function readBrowserCookie(browser, key) {
+  try {
+    if (
+      browser &&
+      browser.cookie &&
+      typeof browser.cookie.get === "function"
+    ) {
+      return await browser.cookie.get(key);
+    }
+  } catch (e) {}
+
+  return undefined;
+}
+
+async function writeBrowserLocalStorage(browser, key, value) {
+  try {
+    if (
+      browser &&
+      browser.localStorage &&
+      typeof browser.localStorage.setItem === "function"
+    ) {
+      await browser.localStorage.setItem(key, value);
+    }
+  } catch (e) {}
+}
+
+async function writeBrowserCookie(browser, key, value) {
+  try {
+    if (
+      browser &&
+      browser.cookie &&
+      typeof browser.cookie.set === "function"
+    ) {
+      await browser.cookie.set(key, value);
+    }
+  } catch (e) {}
+}
+
+function parseJson(value) {
+  try {
+    return value ? JSON.parse(value) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+async function getAttribution(event, browser) {
+  const href = event.context?.window?.location?.href || "";
+  const attribution = {};
+  const urlClickIds = {};
+
+  const urlParamAliases = {
+    gclid: ["gclid", "sggcl"],
+    gbraid: ["gbraid", "sggbra"],
+    wbraid: ["wbraid", "sgwbra"],
+    msclkid: ["msclkid"],
+    fbclid: ["fbclid"],
+    ttclid: ["ttclid"],
+    epik: ["epik"],
+  };
+
+  function getClickIdFromUrl(key) {
+    const aliases = urlParamAliases[key] || [key];
+
+    for (const alias of aliases) {
+      const value = getUrlParam(href, alias);
+
+      if (value) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
+  const storedRaw = await readBrowserLocalStorage(browser, ATTRIBUTION_STORAGE_KEY);
+  const stored = parseJson(storedRaw);
+  stored.click_ids = stored.click_ids || {};
+  stored.page = stored.page || {};
+
+  let changed = false;
+
+  CLICK_ID_KEYS.forEach((key) => {
+    const urlValue = getClickIdFromUrl(key);
+
+    if (urlValue) {
+      attribution[key] = urlValue;
+      urlClickIds[key] = urlValue;
+      stored.click_ids[key] = urlValue;
+      changed = true;
+    }
+  });
+
+  for (const key of CLICK_ID_KEYS) {
+    if (!attribution[key] && stored.click_ids[key]) {
+      attribution[key] = stored.click_ids[key];
+    }
+
+    if (!attribution[key]) {
+      const cookieValue =
+        await readBrowserCookie(browser, "dh_" + key) ||
+        await readBrowserCookie(browser, key);
+
+      if (cookieValue) {
+        attribution[key] = cookieValue;
+        stored.click_ids[key] = cookieValue;
+        changed = true;
+      }
+    }
+  }
+
+  if (!stored.page.landing_page && href) {
+    stored.page.landing_page = href;
+    changed = true;
+  }
+
+  stored.page.page_location = href || undefined;
+  stored.page.page_referrer = event.context?.document?.referrer || undefined;
+  stored.page.page_title = event.context?.document?.title || undefined;
+  stored.updated_at = Date.now();
+
+  attribution.landing_page = stored.page.landing_page;
+  attribution.first_page_referrer = stored.page.page_referrer;
+  attribution.page_location = href || undefined;
+  attribution.page_referrer = event.context?.document?.referrer || undefined;
+
+  if (changed || Object.keys(urlClickIds).length) {
+    await writeBrowserLocalStorage(browser, ATTRIBUTION_STORAGE_KEY, JSON.stringify(stored));
+
+    for (const key of Object.keys(urlClickIds)) {
+      await writeBrowserCookie(browser, "dh_" + key, urlClickIds[key]);
+    }
+  }
+
+  return attribution;
+}
+
+function getAddress(checkout) {
+  const address =
+    checkout.shippingAddress ||
+    checkout.billingAddress ||
+    checkout.deliveryAddress ||
+    {};
+
+  return {
+    address1: address.address1 || address.street || undefined,
+    address2: address.address2 || undefined,
+    city: address.city || undefined,
+    state: address.province || address.provinceCode || address.state || undefined,
+    zip: address.zip || address.postalCode || undefined,
+    country: address.country || address.countryCode || undefined,
+  };
+}
+
+function getCustomer(data) {
+  const checkout = data.checkout || {};
+  const customer = checkout.customer || {};
+  const address = getAddress(checkout);
+
+  return {
+    email: checkout.email || customer.email || undefined,
+    phone: checkout.phone || customer.phone || undefined,
+    first_name:
+      customer.firstName ||
+      checkout.shippingAddress?.firstName ||
+      checkout.billingAddress?.firstName ||
+      undefined,
+    last_name:
+      customer.lastName ||
+      checkout.shippingAddress?.lastName ||
+      checkout.billingAddress?.lastName ||
+      undefined,
+    customer_id: customer.id || checkout.customer?.id || undefined,
+    address,
+  };
+}
+
+function getEcommerce(data, value, currency, transactionId, items) {
+  const checkout = data.checkout || {};
+
+  return {
+    transaction_id: transactionId,
+    value,
+    currency,
+    items,
+    shipping: cleanMoney(
+      checkout.shippingLine?.price?.amount ||
+      checkout.totalShippingPrice?.amount
+    ),
+    tax: cleanMoney(checkout.totalTax?.amount),
+    coupon: Array.isArray(checkout.discountApplications)
+      ? checkout.discountApplications
+          .map((item) => item.title || item.code)
+          .filter(Boolean)
+          .join(",")
+      : undefined,
+  };
+}
+
 function getItems(data) {
   const checkout = data.checkout || {};
   const cartLine = data.cartLine || {};
@@ -142,7 +375,7 @@ function getItems(data) {
   ];
 }
 
-function buildPayload(event, config) {
+async function buildPayload(event, config, browser) {
   const mapped = mapEvent(event.name);
   const data = event.data || {};
   const checkout = data.checkout || {};
@@ -167,23 +400,34 @@ function buildPayload(event, config) {
     cartLine.merchandise?.id ||
     undefined;
 
+  const transactionId = checkout.order?.id || checkout.token || undefined;
+  const items = getItems(data);
+  const attribution = await getAttribution(event, browser);
+  const customer = getCustomer(data);
+  const ecommerce = getEcommerce(data, value, currency, transactionId, items);
+
   return {
     event_id: event.id,
     shop: getShop(event),
     original_event: event.name,
+    event_name: mapped.ga4,
     ga4_event: mapped.ga4,
     meta_event: mapped.meta,
     client_id: event.clientId,
     timestamp: event.timestamp,
+    event_time: event.timestamp,
     page_location: event.context?.window?.location?.href,
     page_title: event.context?.document?.title,
     page_referrer: event.context?.document?.referrer,
     value,
     currency,
-    transaction_id: checkout.order?.id || checkout.token || undefined,
+    transaction_id: transactionId,
     content_ids: itemId ? [String(itemId)] : undefined,
     item_name: product.title || productVariant.title || undefined,
-    items: getItems(data),
+    items,
+    attribution,
+    customer,
+    ecommerce,
     config,
     raw: data,
   };
@@ -354,7 +598,7 @@ function sendToGa4(payload, config) {
   }
 }
 
-register(({ analytics }) => {
+register(({ analytics, browser }) => {
   console.log("[DH Tracking Pixel] loaded with GA4 client sender");
 
   [
@@ -375,7 +619,7 @@ register(({ analytics }) => {
       try {
         const shop = getShop(event);
         const config = await getConfig(shop);
-        const payload = buildPayload(event, config);
+        const payload = await buildPayload(event, config, browser);
 
         console.log("[DH Tracking Pixel]", eventName, payload);
 
