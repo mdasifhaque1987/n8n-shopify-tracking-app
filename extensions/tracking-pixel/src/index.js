@@ -257,6 +257,7 @@ function mapGoogleAdsEventName(payload) {
   return map[payload.ga4_event] || map[payload.original_event] || String(payload.ga4_event || "").toUpperCase();
 }
 
+
 function buildGoogleAdsUrl(payload, conversion) {
   const conversionId = String(conversion.conversionId || "").replace(/^AW-/, "");
   const label = conversion.conversionLabel;
@@ -278,6 +279,7 @@ function buildGoogleAdsUrl(payload, conversion) {
   if (payload.transaction_id) {
     params.set("transaction_id", String(payload.transaction_id));
   }
+
 
   return `${GOOGLE_ADS_CONVERSION_URL}/${encodeURIComponent(conversionId)}/?${params.toString()}`;
 }
