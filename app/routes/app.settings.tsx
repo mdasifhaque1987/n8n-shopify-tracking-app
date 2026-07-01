@@ -6,6 +6,7 @@ import { saveGa4DeliverySettings } from "../services/ga4-delivery-settings.serve
 import { createOrReuseGoogleAdsConversionAction } from "../services/google-ads-conversion-action.server";
 import { saveGoogleAdsConversionAction } from "../services/google-ads-conversion-action-map.server";
 import { saveGoogleConversionConfig } from "../services/google-conversion-config.server";
+import { createMerchantCenterFeed } from "../services/merchant-center-feed.server";
 import { getAssetSelections } from "../services/asset-selection.server";
 import { saveAssetSelection } from "../services/asset-selection.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
@@ -130,7 +131,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 
 export async function action({ request }: ActionFunctionArgs) {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
 
   const formData = await request.formData();
@@ -317,6 +318,90 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
 
+  if (actionType === "create_merchant_feed") {
+    const merchantId = String(formData.get("merchantId") || "").replace(/-/g, "").trim();
+    const selectedTargetCountry = String(formData.get("targetCountry") || "US").trim() || "US";
+    const customTargetCountry = String(formData.get("customTargetCountry") || "").trim().toUpperCase();
+    const targetCountry =
+      selectedTargetCountry === "CUSTOM" && customTargetCountry
+        ? customTargetCountry
+        : selectedTargetCountry;
+    const contentLanguage = String(formData.get("contentLanguage") || "en").trim() || "en";
+    const productIdFormat = String(formData.get("productIdFormat") || "shopify_country_product_variant").trim();
+    const channel = String(formData.get("channel") || "online").trim();
+    const marketingMethod = String(formData.get("marketingMethod") || "all").trim();
+    const includeRestrictedProducts = String(formData.get("includeRestrictedProducts") || "") === "true";
+    const scheduleInterval = String(formData.get("scheduleInterval") || "manual").trim();
+    const limit = Number(formData.get("limit") || 10);
+
+    if (!merchantId) {
+      return Response.json(
+        { ok: false, error: "Please select a Google Merchant Center account first." },
+        { status: 400 }
+      );
+    }
+
+    const googleConnection = await getGooglePlatformConnection(workspace.id);
+
+    if (!googleConnection) {
+      return Response.json(
+        { ok: false, error: "Google is not connected." },
+        { status: 400 }
+      );
+    }
+
+    let googleAccessToken = "";
+
+    try {
+      googleAccessToken = await resolveGoogleAccessToken(googleConnection);
+    } catch (error) {
+      return Response.json(
+        {
+          ok: false,
+          error: "Google access token could not be decrypted/refreshed. Please reconnect Google if needed.",
+          details: error instanceof Error ? error.message : String(error),
+        },
+        { status: 400 }
+      );
+    }
+
+    try {
+      const result = await createMerchantCenterFeed({
+        admin,
+        accessToken: googleAccessToken,
+        merchantId,
+        shop: session.shop,
+        limit,
+        targetCountry,
+        contentLanguage,
+        productIdFormat,
+        channel: channel === "local" ? "local" : "online",
+        marketingMethod:
+          marketingMethod === "free_listings" || marketingMethod === "shopping_ads"
+            ? marketingMethod
+            : "all",
+        includeRestrictedProducts,
+        scheduleInterval,
+      });
+
+      return Response.json({
+        ok: true,
+        message: `Merchant Center feed completed. Uploaded/updated: ${result.uploaded}, Skipped unchanged: ${result.skippedUnchanged || 0}, Failed: ${result.failed}, Skipped out of stock: ${result.skippedOutOfStock || 0}, Skipped restricted: ${result.skippedRestricted || 0}. Format: ${result.productIdFormat}. Sample ID: ${result.sampleOfferIds?.[0] || "n/a"}. Schedule: ${result.scheduleInterval || "manual"}.`,
+        result,
+      });
+    } catch (error) {
+      return Response.json(
+        {
+          ok: false,
+          error: "Merchant Center feed upload failed.",
+          details: error instanceof Error ? error.message : String(error),
+        },
+        { status: 400 }
+      );
+    }
+  }
+
+
   return Response.json({ ok: false, error: "Unknown action" }, { status: 400 });
 }
 
@@ -381,6 +466,20 @@ export default function ConfigurationPage() {
   const [selectedAssets, setSelectedAssets] =
     useState<Record<string, string>>(savedAssetSelections || {});
   const assetSelectionFetcher = useFetcher();
+  const feedFetcher = useFetcher();
+  const feedResult = feedFetcher.data as
+    | {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        details?: string;
+        result?: {
+          total?: number;
+          uploaded?: number;
+          failed?: number;
+        };
+      }
+    | undefined;
   const ga4DeliveryFetcher = useFetcher();
   const ga4DeliveryResult = ga4DeliveryFetcher.data as
     | { ok?: boolean; error?: string; message?: string }
@@ -389,12 +488,23 @@ export default function ConfigurationPage() {
     ga4DeliverySettings?.setting?.deliveryMode === "server" ? "server" : "client"
   );
 
+  const [feedTargetCountry, setFeedTargetCountry] = useState("US");
+  const [feedCustomTargetCountry, setFeedCustomTargetCountry] = useState("");
+  const [feedProductIdFormat, setFeedProductIdFormat] = useState("shopify_country_product_variant");
+  const [feedChannel, setFeedChannel] = useState("online");
+  const [feedMarketingMethod, setFeedMarketingMethod] = useState("all");
+  const [feedIncludeRestrictedProducts, setFeedIncludeRestrictedProducts] = useState(false);
+
   const ga4PropertyValue =
     selectedAssets["google:GA4 Property"] || "";
   const googleAdsAccountValue =
     selectedAssets["google:Google Ads Account / Manager Account"] || "";
   const merchantCenterValue =
     selectedAssets["google:Google Merchant Center"] || "";
+
+  const merchantCountryCodes = "AF AX AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ BM BT BO BQ BA BW BV BR IO BN BG BF BI KH CM CA CV KY CF TD CL CN CX CC CO KM CG CD CK CR CI HR CU CW CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KW KG LA LV LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY PE PH PN PL PT PR QA RE RO RU RW BL SH KN LC MF PM VC WS SM ST SA SN RS SC SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH TW TJ TZ TH TL TG TK TO TT TN TR TM TC TV UG UA AE GB UM US UY UZ VU VE VN VG VI WF EH YE ZM ZW"
+    .split(" ")
+    .filter(Boolean);
 
   function fieldKey(platformKey: string, field: string) {
     return `${platformKey}:${field}`;
@@ -864,80 +974,162 @@ export default function ConfigurationPage() {
 
       {activeModal === "feed" && (
         <Modal title="Merchant Center Feed Configuration" onClose={() => setActiveModal(null)}>
-          <div style={styles.modalGrid}>
+          <feedFetcher.Form method="post" style={{ maxWidth: "760px", overflowX: "hidden" }}>
+            <input type="hidden" name="_action" value="create_merchant_feed" />
+            <input type="hidden" name="merchantId" value={merchantCenterValue} />
+            <input type="hidden" name="contentLanguage" value="en" />
+            <input type="hidden" name="limit" value="10" />
+            <input type="hidden" name="uploadRunId" value={String(Date.now())} />
+
             <label style={styles.label}>
               Selected Merchant Center
-              <input style={styles.input} value={merchantCenterValue} readOnly />
+              <input
+                style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}
+                value={merchantCenterValue}
+                readOnly
+              />
             </label>
 
             <label style={styles.label}>
               Target Country
-              <select style={styles.select} defaultValue="US">
+              <select name="targetCountry" defaultValue="US" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
                 <option value="US">United States - US</option>
                 <option value="CA">Canada - CA</option>
                 <option value="GB">United Kingdom - GB</option>
                 <option value="AU">Australia - AU</option>
                 <option value="BD">Bangladesh - BD</option>
+                {merchantCountryCodes
+                  .filter((code) => !["US", "CA", "GB", "AU", "BD"].includes(code))
+                  .map((code) => (
+                    <option key={code} value={code}>
+                      {code}
+                    </option>
+                  ))}
+                <option value="CUSTOM">Custom country code</option>
               </select>
             </label>
 
             <label style={styles.label}>
+              Custom Target Country Code
+              <input
+                name="customTargetCountry"
+                style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}
+                placeholder="Only used when Target Country is CUSTOM. Example: ZZ"
+                maxLength={2}
+              />
+            </label>
+
+            <label style={styles.label}>
               Product ID Format
-              <select style={styles.select} defaultValue="country_product_variant">
-                <option value="country_product">Shopify_country-code_productID</option>
-                <option value="country_variant">Shopify_country-code_variantID</option>
-                <option value="country_product_variant">Shopify_country-code_productID_variantID</option>
-                <option value="product_variant">productID+variantID</option>
-                <option value="variant">variantID only</option>
-                <option value="product">productID only</option>
+              <select
+                name="productIdFormat"
+                defaultValue="shopify_country_product_variant"
+                style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}
+              >
+                <option value="shopify_country_product_variant">Shopify_US_productID_variantID</option>
+                <option value="product_variant">productID_variantID</option>
+                <option value="product_id">productid</option>
+                <option value="variant_id">variantID</option>
+                <option value="sku">SKU</option>
+              </select>
+            </label>
+
+            <label style={styles.label}>
+              Product Channel
+              <select name="channel" defaultValue="online" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
+                <option value="online">Online products</option>
+                <option value="local">Local products later / advanced</option>
+              </select>
+            </label>
+
+            <label style={styles.label}>
+              Marketing Methods
+              <select name="marketingMethod" defaultValue="all" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
+                <option value="all">Free listings and Shopping ads</option>
+                <option value="free_listings">Free listings only</option>
+                <option value="shopping_ads">Shopping ads only</option>
+              </select>
+            </label>
+
+            <label style={styles.label}>
+              Feed Update Schedule
+              <select name="scheduleInterval" defaultValue="manual" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
+                <option value="manual">Manual upload only</option>
+                <option value="hourly">Hourly</option>
+                <option value="every_3_hours">Every 3 hours</option>
+                <option value="every_6_hours">Every 6 hours</option>
+                <option value="every_9_hours">Every 9 hours</option>
+                <option value="daily">Daily</option>
               </select>
             </label>
 
             <label style={styles.label}>
               Feed Creation Method
-              <select style={styles.select} defaultValue="all">
-                <option value="all">All active Shopify products</option>
-                <option value="category">Create feed by category/collection</option>
-                <option value="selected">Create feed from selected products</option>
+              <select style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
+                <option value="all">All active in-stock Shopify products</option>
+                <option value="category">Create feed by category/collection later</option>
+                <option value="selected">Create feed from selected products later</option>
               </select>
             </label>
 
             <label style={styles.label}>
               Category / Collection
-              <select style={styles.select} defaultValue="">
-                <option value="">Select category or collection</option>
-                <option value="pending">Collection loading API pending</option>
+              <select style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
+                <option>Select category or collection</option>
+                <option>Collection loading API pending</option>
               </select>
             </label>
 
-            <label style={styles.label}>
-              Specific Products
-              <textarea
-                style={styles.textarea}
-                placeholder="Search/select products later. Product selector API pending."
-              />
-            </label>
-
-            <div style={styles.checkGrid}>
-              {["Sync title", "Sync description", "Sync images", "Sync variants", "Sync price", "Sync inventory", "Sync category"].map((item) => (
-                <label key={item} style={styles.checkboxLabel}>
-                  <input type="checkbox" defaultChecked />
-                  {item}
-                </label>
-              ))}
+            <div style={{ ...styles.checkboxGrid, width: "100%", boxSizing: "border-box" }}>
+              <label><input type="checkbox" defaultChecked /> Sync title</label>
+              <label><input type="checkbox" defaultChecked /> Sync description</label>
+              <label><input type="checkbox" defaultChecked /> Sync images</label>
+              <label><input type="checkbox" defaultChecked /> Sync variants</label>
+              <label><input type="checkbox" defaultChecked /> Sync price</label>
+              <label><input type="checkbox" defaultChecked /> Sync inventory</label>
+              <label><input type="checkbox" defaultChecked /> Sync category</label>
             </div>
 
-            <div style={styles.modalActions}>
+            <div style={{ marginTop: 12, padding: 12, border: "1px solid #fde68a", borderRadius: 10, background: "#fffbeb" }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontWeight: 700 }}>
+                <input name="includeRestrictedProducts" type="checkbox" value="true" />
+                Include restricted/adult products if detected
+              </label>
+              <p style={{ margin: "6px 0 0", color: "#92400e", fontSize: 13 }}>
+                Default: unchecked. Restricted/adult items are skipped unless this is checked.
+              </p>
+            </div>
+
+            <div style={{ ...styles.modalActions, flexWrap: "wrap", gap: 10 }}>
               <button type="button" style={styles.secondaryButton} onClick={() => setActiveModal(null)}>
                 Cancel
               </button>
-              <button type="button" style={styles.primaryButton}>
-                Save Feed Configuration
+
+              <button
+                type="submit"
+                style={styles.primaryButton}
+                disabled={feedFetcher.state !== "idle" || !merchantCenterValue}
+              >
+                {feedFetcher.state === "idle" ? "Upload Feed to Merchant Center" : "Uploading Feed..."}
               </button>
+
+              {feedResult?.message && (
+                <div style={styles.successBox}>
+                  {feedResult.message}
+                </div>
+              )}
+
+              {feedResult?.error && (
+                <div style={styles.errorBox}>
+                  {feedResult.error}
+                  {feedResult.details ? ` Details: ${feedResult.details}` : ""}
+                </div>
+              )}
             </div>
-          </div>
+          </feedFetcher.Form>
         </Modal>
       )}
+
     </main>
   );
 }

@@ -50,7 +50,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       accessToken: tokenData.accessToken,
       refreshToken: tokenData.refreshToken,
       tokenExpiresAt: tokenData.expiresAt,
-      scopes: ["adwords", "analytics", "userinfo"],
+      scopes: ["adwords", "analytics", "userinfo", "content"],
     });
 
     // Clean up used state
