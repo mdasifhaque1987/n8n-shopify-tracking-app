@@ -194,12 +194,12 @@ async function getAttribution(event, browser) {
   const urlClickIds = {};
 
   const urlParamAliases = {
-    gclid: ["gclid", "sggcl"],
-    gbraid: ["gbraid", "sggbra"],
-    wbraid: ["wbraid", "sgwbra"],
-    msclkid: ["msclkid"],
-    fbclid: ["fbclid"],
-    ttclid: ["ttclid"],
+    gclid: ["gclid", "dhgcl"],
+    gbraid: ["gbraid", "dhgbra"],
+    wbraid: ["wbraid", "dhwbra"],
+    msclkid: ["msclkid", "dhclkid"],
+    fbclid: ["fbclid", "dhclid"],
+    ttclid: ["ttclid", "dhclid"],
     epik: ["epik"],
   };
 
