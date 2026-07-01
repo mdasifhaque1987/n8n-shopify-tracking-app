@@ -1,3 +1,4 @@
+import db from "../db.server";
 import { resolveGoogleAccessToken } from "../services/google-token.server";
 import { useState } from "react";
 import { useFetcher, useLoaderData } from "react-router";
@@ -113,6 +114,37 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
+  const savedGoogleAdsCustomerId = String(
+    savedAssetSelections["google:Google Ads Account / Manager Account"] ||
+      savedAssetSelections["GOOGLE_ADS:Google Ads Account / Manager Account"] ||
+      ""
+  )
+    .replace(/-/g, "")
+    .trim();
+
+  const googleAdsConversionActions = savedGoogleAdsCustomerId
+    ? await db.googleAdsConversionAction.findMany({
+        where: {
+          workspaceId: workspace.id,
+          googleAdsCustomerId: savedGoogleAdsCustomerId,
+          isActive: true,
+        },
+        select: {
+          id: true,
+          eventName: true,
+          conversionName: true,
+          conversionId: true,
+          conversionLabel: true,
+          conversionActionId: true,
+          deliveryMode: true,
+          isActive: true,
+        },
+        orderBy: {
+          updatedAt: "desc",
+        },
+      })
+    : [];
+
   return {
     shop: session.shop,
     connections: {
@@ -126,6 +158,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     assets,
     savedAssetSelections,
     ga4DeliverySettings,
+    googleAdsConversionActions,
   };
 }
 
@@ -318,6 +351,76 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
 
+  if (actionType === "delete_google_conversion") {
+    const conversionActionRecordId = String(formData.get("conversionActionRecordId") || "");
+
+    if (!conversionActionRecordId) {
+      return Response.json(
+        { ok: false, error: "Missing conversion action record ID." },
+        { status: 400 }
+      );
+    }
+
+    const conversionAction = await db.googleAdsConversionAction.findFirst({
+      where: {
+        id: conversionActionRecordId,
+        workspaceId: workspace.id,
+      },
+      select: {
+        id: true,
+        eventName: true,
+        googleAdsCustomerId: true,
+      },
+    });
+
+    if (!conversionAction) {
+      return Response.json(
+        { ok: false, error: "Conversion action not found." },
+        { status: 404 }
+      );
+    }
+
+    await db.googleAdsConversionAction.update({
+      where: {
+        id: conversionAction.id,
+      },
+      data: {
+        isActive: false,
+      },
+    });
+
+    const configs = await db.googleConversionConfig.findMany({
+      where: {
+        workspaceId: workspace.id,
+        googleAdsCustomerId: conversionAction.googleAdsCustomerId,
+        isActive: true,
+      },
+      select: {
+        id: true,
+        events: true,
+      },
+    });
+
+    for (const config of configs) {
+      if (config.events.includes(conversionAction.eventName)) {
+        await db.googleConversionConfig.update({
+          where: {
+            id: config.id,
+          },
+          data: {
+            events: config.events.filter((event) => event !== conversionAction.eventName),
+          },
+        });
+      }
+    }
+
+    return Response.json({
+      ok: true,
+      message: `${conversionAction.eventName} conversion removed from app tracking.`,
+      deletedEventName: conversionAction.eventName,
+    });
+  }
+
   if (actionType === "create_merchant_feed") {
     const merchantId = String(formData.get("merchantId") || "").replace(/-/g, "").trim();
     const selectedTargetCountry = String(formData.get("targetCountry") || "US").trim() || "US";
@@ -457,9 +560,20 @@ const platformConfigs = [
 ];
 
 export default function ConfigurationPage() {
-  const { shop, connections, assets, savedAssetSelections, ga4DeliverySettings } = useLoaderData<typeof loader>();
+  const {
+    shop,
+    connections,
+    assets,
+    savedAssetSelections,
+    ga4DeliverySettings,
+    googleAdsConversionActions,
+  } = useLoaderData<typeof loader>();
   const [activeModal, setActiveModal] = useState<"ga4" | "conversions" | "feed" | null>(null);
   const conversionFetcher = useFetcher();
+  const deleteConversionFetcher = useFetcher();
+  const deleteConversionResult = deleteConversionFetcher.data as
+    | { ok?: boolean; error?: string; message?: string }
+    | undefined;
   const conversionResult = conversionFetcher.data as
     | { ok?: boolean; error?: string; message?: string }
     | undefined;
@@ -890,16 +1004,24 @@ export default function ConfigurationPage() {
                 Page View
               </label>
               <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="VIEW_ITEM" />
+                <input type="checkbox" name="events" value="VIEW_ITEM" defaultChecked />
                 View Item
               </label>
               <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="ADD_TO_CART" />
+                <input type="checkbox" name="events" value="ADD_TO_CART" defaultChecked />
                 Add to Cart
               </label>
               <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="BEGIN_CHECKOUT" />
+                <input type="checkbox" name="events" value="BEGIN_CHECKOUT" defaultChecked />
                 Begin Checkout
+              </label>
+              <label style={styles.checkboxLabel}>
+                <input type="checkbox" name="events" value="ADD_SHIPPING_INFO" defaultChecked />
+                Add Shipping Info
+              </label>
+              <label style={styles.checkboxLabel}>
+                <input type="checkbox" name="events" value="ADD_PAYMENT_INFO" defaultChecked />
+                Add Payment Info
               </label>
               <label style={styles.checkboxLabel}>
                 <input type="checkbox" name="events" value="PURCHASE" defaultChecked />
@@ -969,6 +1091,82 @@ export default function ConfigurationPage() {
               </button>
             </div>
           </conversionFetcher.Form>
+
+          <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid #e5e7eb" }}>
+            <h3 style={{ margin: "0 0 10px", fontSize: "16px" }}>
+              Created Google Ads Conversions
+            </h3>
+
+            {deleteConversionResult?.ok && (
+              <div style={styles.successBox}>
+                {deleteConversionResult.message || "Conversion removed."}
+              </div>
+            )}
+
+            {deleteConversionResult?.error && (
+              <div style={styles.errorBox}>
+                {deleteConversionResult.error}
+              </div>
+            )}
+
+            {!googleAdsConversionActions?.length && (
+              <p style={{ margin: 0, color: "#6b7280", fontSize: "13px" }}>
+                No active Google Ads conversions found for the selected account.
+              </p>
+            )}
+
+            {Boolean(googleAdsConversionActions?.length) && (
+              <div style={{ display: "grid", gap: "8px" }}>
+                {googleAdsConversionActions.map((conversion) => (
+                  <div
+                    key={conversion.id}
+                    style={{
+                      display: "grid",
+                      gridTemplateColumns: "1fr 1.3fr 1fr 1.2fr auto",
+                      gap: "8px",
+                      alignItems: "center",
+                      padding: "10px",
+                      border: "1px solid #e5e7eb",
+                      borderRadius: "10px",
+                      fontSize: "12px",
+                    }}
+                  >
+                    <div>
+                      <strong>{conversion.eventName}</strong>
+                      <div style={{ color: "#6b7280" }}>{conversion.deliveryMode}</div>
+                    </div>
+
+                    <div>{conversion.conversionName || "-"}</div>
+                    <div>{conversion.conversionId || "-"}</div>
+
+                    <div
+                      title={conversion.conversionLabel || ""}
+                      style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    >
+                      {conversion.conversionLabel || "-"}
+                    </div>
+
+                    <deleteConversionFetcher.Form method="post">
+                      <input type="hidden" name="_action" value="delete_google_conversion" />
+                      <input type="hidden" name="conversionActionRecordId" value={conversion.id} />
+                      <button
+                        type="submit"
+                        style={{
+                          ...styles.secondaryButton,
+                          padding: "8px 10px",
+                          borderColor: "#fecaca",
+                          color: "#b91c1c",
+                        }}
+                        disabled={deleteConversionFetcher.state !== "idle"}
+                      >
+                        Delete
+                      </button>
+                    </deleteConversionFetcher.Form>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </Modal>
       )}
 
