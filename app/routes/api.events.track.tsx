@@ -3,6 +3,7 @@ import db from "../db.server";
 import { normalizeIncomingEvent } from "../services/normalize-event.server";
 import { createEventDeliveryLog, sanitizeTrackingEvent } from "../services/event-delivery-log.server";
 import { dispatchPurchaseToGoogleAds } from "../services/dispatchers/google-ads.dispatcher";
+import { enrichShopifyOrderCustomer } from "../services/shopify-order-enrichment.server";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -48,8 +49,13 @@ export async function action({ request }: ActionFunctionArgs) {
 
   try {
     const payload = await request.json();
-    const event = normalizeIncomingEvent(payload);
+    let event = normalizeIncomingEvent(payload);
     const shop = getShopFromRequest(request, payload) || event.shop || null;
+
+
+    if (shop && event.event_name === "purchase") {
+      event = await enrichShopifyOrderCustomer(event, shop);
+    }
 
     let workspaceId: string | null = null;
 

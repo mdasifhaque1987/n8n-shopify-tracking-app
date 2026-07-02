@@ -109,6 +109,7 @@ function safeString(value) {
 }
 
 const ATTRIBUTION_STORAGE_KEY = "dh_tracking_attribution";
+const CUSTOMER_STORAGE_KEY = "dh_tracking_customer";
 
 const CLICK_ID_KEYS = [
   "gclid",
@@ -279,44 +280,299 @@ async function getAttribution(event, browser) {
   return attribution;
 }
 
-function getAddress(checkout) {
-  const address =
-    checkout.shippingAddress ||
-    checkout.billingAddress ||
-    checkout.deliveryAddress ||
-    {};
+function firstValue() {
+  for (var i = 0; i < arguments.length; i += 1) {
+    var value = arguments[i];
+
+    if (value !== undefined && value !== null && String(value).trim() !== "") {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function getPathValue(source, path) {
+  try {
+    var parts = path.split(".");
+    var current = source;
+
+    for (var i = 0; i < parts.length; i += 1) {
+      if (current === undefined || current === null) return undefined;
+      current = current[parts[i]];
+    }
+
+    return firstValue(current);
+  } catch (e) {
+    return undefined;
+  }
+}
+
+function findDeepValue(source, keys) {
+  var seen = [];
+
+  function walk(value) {
+    if (!value || typeof value !== "object") return undefined;
+
+    if (seen.indexOf(value) !== -1) return undefined;
+    seen.push(value);
+
+    for (var i = 0; i < keys.length; i += 1) {
+      var key = keys[i];
+
+      if (
+        Object.prototype.hasOwnProperty.call(value, key) &&
+        value[key] !== undefined &&
+        value[key] !== null &&
+        String(value[key]).trim() !== ""
+      ) {
+        return value[key];
+      }
+    }
+
+    var objectKeys = Object.keys(value);
+
+    for (var j = 0; j < objectKeys.length; j += 1) {
+      var result = walk(value[objectKeys[j]]);
+
+      if (result !== undefined) {
+        return result;
+      }
+    }
+
+    return undefined;
+  }
+
+  return walk(source);
+}
+
+function normalizeAddress(address) {
+  address = address || {};
 
   return {
-    address1: address.address1 || address.street || undefined,
-    address2: address.address2 || undefined,
-    city: address.city || undefined,
-    state: address.province || address.provinceCode || address.state || undefined,
-    zip: address.zip || address.postalCode || undefined,
-    country: address.country || address.countryCode || undefined,
+    address1: firstValue(
+      address.address1,
+      address.address_line_1,
+      address.line1,
+      address.street,
+      address.streetAddress
+    ),
+    address2: firstValue(
+      address.address2,
+      address.address_line_2,
+      address.line2,
+      address.apartment,
+      address.company
+    ),
+    city: firstValue(address.city, address.locality),
+    state: firstValue(
+      address.province,
+      address.provinceCode,
+      address.state,
+      address.stateCode,
+      address.region
+    ),
+    zip: firstValue(
+      address.zip,
+      address.postalCode,
+      address.postal_code,
+      address.postcode
+    ),
+    country: firstValue(
+      address.country,
+      address.countryCode,
+      address.country_code
+    ),
+  };
+}
+
+function getAddress(checkout) {
+  return normalizeAddress(
+    firstValue(
+      checkout.shippingAddress,
+      checkout.billingAddress,
+      checkout.deliveryAddress,
+      checkout.address
+    ) || {}
+  );
+}
+
+function splitName(name) {
+  name = firstValue(name);
+
+  if (!name) {
+    return {
+      first_name: undefined,
+      last_name: undefined,
+    };
+  }
+
+  var parts = String(name).trim().split(/\s+/);
+
+  return {
+    first_name: parts[0],
+    last_name: parts.length > 1 ? parts.slice(1).join(" ") : undefined,
   };
 }
 
 function getCustomer(data) {
-  const checkout = data.checkout || {};
-  const customer = checkout.customer || {};
-  const address = getAddress(checkout);
+  var checkout = data.checkout || {};
+  var customer = checkout.customer || data.customer || {};
+  var shippingAddress = checkout.shippingAddress || {};
+  var billingAddress = checkout.billingAddress || {};
+  var deliveryAddress = checkout.deliveryAddress || {};
+  var address = getAddress(checkout);
+
+  var fullName = firstValue(
+    customer.name,
+    checkout.name,
+    checkout.customerName,
+    shippingAddress.name,
+    billingAddress.name,
+    deliveryAddress.name
+  );
+
+  var split = splitName(fullName);
+
+  var email = firstValue(
+    checkout.email,
+    checkout.contactEmail,
+    checkout.customerEmail,
+    customer.email,
+    getPathValue(checkout, "buyerIdentity.email"),
+    getPathValue(checkout, "contact.email"),
+    getPathValue(checkout, "contactInfo.email"),
+    findDeepValue(checkout, ["email", "emailAddress", "contactEmail"])
+  );
+
+  var phone = firstValue(
+    checkout.phone,
+    checkout.customerPhone,
+    customer.phone,
+    shippingAddress.phone,
+    billingAddress.phone,
+    deliveryAddress.phone,
+    getPathValue(checkout, "contact.phone"),
+    getPathValue(checkout, "contactInfo.phone"),
+    findDeepValue(checkout, ["phone", "phoneNumber", "mobile"])
+  );
+
+  var firstName = firstValue(
+    customer.firstName,
+    customer.first_name,
+    checkout.firstName,
+    checkout.first_name,
+    shippingAddress.firstName,
+    shippingAddress.first_name,
+    billingAddress.firstName,
+    billingAddress.first_name,
+    deliveryAddress.firstName,
+    deliveryAddress.first_name,
+    split.first_name,
+    findDeepValue(checkout, ["firstName", "first_name"])
+  );
+
+  var lastName = firstValue(
+    customer.lastName,
+    customer.last_name,
+    checkout.lastName,
+    checkout.last_name,
+    shippingAddress.lastName,
+    shippingAddress.last_name,
+    billingAddress.lastName,
+    billingAddress.last_name,
+    deliveryAddress.lastName,
+    deliveryAddress.last_name,
+    split.last_name,
+    findDeepValue(checkout, ["lastName", "last_name"])
+  );
+
+  var customerId = firstValue(
+    customer.id,
+    checkout.customerId,
+    checkout.customer_id,
+    getPathValue(checkout, "customer.id"),
+    getPathValue(checkout, "buyerIdentity.customer.id"),
+    findDeepValue(checkout, ["customerId", "customer_id"])
+  );
 
   return {
-    email: checkout.email || customer.email || undefined,
-    phone: checkout.phone || customer.phone || undefined,
-    first_name:
-      customer.firstName ||
-      checkout.shippingAddress?.firstName ||
-      checkout.billingAddress?.firstName ||
-      undefined,
-    last_name:
-      customer.lastName ||
-      checkout.shippingAddress?.lastName ||
-      checkout.billingAddress?.lastName ||
-      undefined,
-    customer_id: customer.id || checkout.customer?.id || undefined,
-    address,
+    email: email,
+    phone: phone,
+    first_name: firstName,
+    last_name: lastName,
+    customer_id: customerId,
+    address: address,
   };
+}
+
+function mergeAddress(storedAddress, currentAddress) {
+  storedAddress = storedAddress || {};
+  currentAddress = currentAddress || {};
+
+  return {
+    address1: firstValue(currentAddress.address1, storedAddress.address1),
+    address2: firstValue(currentAddress.address2, storedAddress.address2),
+    city: firstValue(currentAddress.city, storedAddress.city),
+    state: firstValue(currentAddress.state, storedAddress.state),
+    zip: firstValue(currentAddress.zip, storedAddress.zip),
+    country: firstValue(currentAddress.country, storedAddress.country),
+  };
+}
+
+function mergeCustomer(storedCustomer, currentCustomer) {
+  storedCustomer = storedCustomer || {};
+  currentCustomer = currentCustomer || {};
+
+  return {
+    email: firstValue(currentCustomer.email, storedCustomer.email),
+    phone: firstValue(currentCustomer.phone, storedCustomer.phone),
+    first_name: firstValue(currentCustomer.first_name, storedCustomer.first_name),
+    last_name: firstValue(currentCustomer.last_name, storedCustomer.last_name),
+    customer_id: firstValue(currentCustomer.customer_id, storedCustomer.customer_id),
+    address: mergeAddress(storedCustomer.address, currentCustomer.address),
+  };
+}
+
+function hasCustomerData(customer) {
+  if (!customer) return false;
+
+  if (
+    firstValue(
+      customer.email,
+      customer.phone,
+      customer.first_name,
+      customer.last_name,
+      customer.customer_id
+    )
+  ) {
+    return true;
+  }
+
+  var address = customer.address || {};
+
+  return !!firstValue(
+    address.address1,
+    address.address2,
+    address.city,
+    address.state,
+    address.zip,
+    address.country
+  );
+}
+
+async function getCustomerForEvent(data, browser) {
+  var currentCustomer = getCustomer(data);
+  var storedRaw = await readBrowserLocalStorage(browser, CUSTOMER_STORAGE_KEY);
+  var storedCustomer = parseJson(storedRaw);
+
+  var mergedCustomer = mergeCustomer(storedCustomer, currentCustomer);
+
+  if (hasCustomerData(mergedCustomer)) {
+    await writeBrowserLocalStorage(browser, CUSTOMER_STORAGE_KEY, mergedCustomer);
+  }
+
+  return mergedCustomer;
 }
 
 function getEcommerce(data, value, currency, transactionId, items) {
@@ -403,7 +659,7 @@ async function buildPayload(event, config, browser) {
   const transactionId = checkout.order?.id || checkout.token || undefined;
   const items = getItems(data);
   const attribution = await getAttribution(event, browser);
-  const customer = getCustomer(data);
+  const customer = await getCustomerForEvent(data, browser);
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
 
   return {
