@@ -2,6 +2,7 @@ import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import db from "../db.server";
 import { normalizeIncomingEvent } from "../services/normalize-event.server";
 import { createEventDeliveryLog, sanitizeTrackingEvent } from "../services/event-delivery-log.server";
+import { dispatchPurchaseToGoogleAds } from "../services/dispatchers/google-ads.dispatcher";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -71,8 +72,34 @@ export async function action({ request }: ActionFunctionArgs) {
       platform: "internal",
       deliveryType: "server",
       status: "received",
-      message: "Event validated and logged. External sending is disabled in this foundation phase.",
+      message: "Event validated and logged.",
     });
+
+    let googleAdsServerResult = null;
+
+    if (workspaceId && event.event_name === "purchase") {
+      googleAdsServerResult = await dispatchPurchaseToGoogleAds(
+        {
+          ...event,
+          shop,
+        },
+        workspaceId
+      );
+
+      await createEventDeliveryLog({
+        workspaceId,
+        shop,
+        event: {
+          ...event,
+          shop,
+        },
+        platform: "google_ads",
+        deliveryType: "server",
+        status: googleAdsServerResult.status,
+        message: googleAdsServerResult.message,
+        responsePayload: googleAdsServerResult.responsePayload || null,
+      });
+    }
 
     return Response.json(
       {
@@ -83,6 +110,7 @@ export async function action({ request }: ActionFunctionArgs) {
         workspaceFound: Boolean(workspaceId),
         eventName: event.event_name,
         eventId: event.event_id,
+        googleAdsServer: googleAdsServerResult,
         sanitized: sanitizeTrackingEvent(event),
       },
       { headers: corsHeaders }
