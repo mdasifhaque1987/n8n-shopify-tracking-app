@@ -19,7 +19,8 @@ const GOOGLE_SCOPES = [
   "https://www.googleapis.com/auth/analytics.readonly", // GA4
   "https://www.googleapis.com/auth/userinfo.email", // Email
   "https://www.googleapis.com/auth/userinfo.profile", // Profile
-  "https://www.googleapis.com/auth/content", // Merchant Center / Shopping Content API
+  "https://www.googleapis.com/auth/content", // Merchant Center / Shopping Content API,
+  "https://www.googleapis.com/auth/datamanager",
 ];
 
 /**
