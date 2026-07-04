@@ -30,14 +30,16 @@ if (host === "localhost") {
   hmrConfig = {
     protocol: "wss",
     host: host,
-    port: parseInt(process.env.FRONTEND_PORT) || 8002,
     clientPort: 443,
   };
 }
 
 export default defineConfig({
   server: {
-    allowedHosts: [host],
+    allowedHosts: [
+      "tracking.datahatches.com",
+      host,
+    ].filter(Boolean),
     cors: {
       preflightContinue: true,
     },

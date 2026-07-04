@@ -1,7 +1,7 @@
 import db from "../db.server";
 import { resolveGoogleAccessToken } from "../services/google-token.server";
 import { useState } from "react";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useLocation, useNavigate } from "react-router";
 import { getGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
 import { saveGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
 import { createOrReuseGoogleAdsConversionAction } from "../services/google-ads-conversion-action.server";
@@ -24,6 +24,29 @@ import {
   getMerchantCenters,
 } from "../services/oauth/google.server";
 
+import { getTestModeSettings, saveTestModeSettings } from "../services/test-mode.server";
+async function withTimeout<T>(
+  promise: Promise<T>,
+  fallback: T,
+  timeoutMs = 8000
+): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    const timeoutPromise = new Promise<T>((resolve) => {
+      timeoutHandle = setTimeout(() => resolve(fallback), timeoutMs);
+    });
+
+    return await Promise.race([promise, timeoutPromise]);
+  } catch (error) {
+    return fallback;
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
+}
+
 type AssetOption = {
   value: string;
   label: string;
@@ -35,7 +58,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const savedConnections = await getWorkspaceConnections(workspace.id);
   const savedAssetSelections = await getAssetSelections(workspace.id);
   const ga4DeliverySettings = await getGa4DeliverySettings(workspace.id);
+  const testModeSettings = await getTestModeSettings(workspace.id);
   const savedGa4PropertyId = savedAssetSelections["google:GA4 Property"] || "";
+  const url = new URL(request.url);
+  const navParams = new URLSearchParams();
+  const host = url.searchParams.get("host");
+  const embedded = url.searchParams.get("embedded");
+  const locale = url.searchParams.get("locale");
+
+  navParams.set("shop", session.shop);
+  if (host) navParams.set("host", host);
+  if (embedded) navParams.set("embedded", embedded);
+  if (locale) navParams.set("locale", locale);
+  const shouldLoadGa4Assets = url.searchParams.get("loadGa4Assets") === "true" || url.searchParams.get("loadGoogleAssets") === "true";
 
   const getStatus = (platform: string) => {
     const connection = savedConnections.find(
@@ -69,48 +104,61 @@ export async function loader({ request }: LoaderFunctionArgs) {
     (item) => item.platform === "GOOGLE_ADS" && item.isActive
   );
 
+
   if (googleConnection) {
     const decryptedGoogleConnection = await getPlatformConnection(googleConnection.id);
 
     if (decryptedGoogleConnection?.decryptedAccessToken) {
-      const ga4Properties = await getGoogleAnalyticsProperties(
-        decryptedGoogleConnection.decryptedAccessToken
+      const googleAdsAccounts = await withTimeout(
+        getGoogleAdsAccounts(decryptedGoogleConnection.decryptedAccessToken),
+        [],
+        12000
       );
-
-      const googleAdsAccounts = await getGoogleAdsAccounts(
-        decryptedGoogleConnection.decryptedAccessToken
-      );
-
-      const merchantCenters = await getMerchantCenters(
-        decryptedGoogleConnection.decryptedAccessToken
-      );
-
-      assets.google.ga4Properties = ga4Properties.map((property) => ({
-        value: property.propertyId,
-        label: `${property.displayName} (${property.propertyId})`,
-      }));
-
-      if (savedGa4PropertyId) {
-        const ga4DataStreams = await getGoogleAnalyticsDataStreams(
-          decryptedGoogleConnection.decryptedAccessToken,
-          savedGa4PropertyId
-        );
-
-        assets.google.ga4DataStreams = ga4DataStreams.map((stream) => ({
-          value: stream.measurementId,
-          label: `${stream.displayName} (${stream.measurementId})`,
-        }));
-      }
 
       assets.google.googleAdsAccounts = googleAdsAccounts.map((account) => ({
         value: account.customerId,
-        label: account.descriptiveName,
+        label: `${account.descriptiveName || "Google Ads Account"} (${account.customerId})`,
       }));
+
+      const merchantCenters = await withTimeout(
+        getMerchantCenters(decryptedGoogleConnection.decryptedAccessToken),
+        [],
+        12000
+      );
 
       assets.google.merchantCenters = merchantCenters.map((account) => ({
         value: account.merchantId,
-        label: account.name,
+        label: `${account.name || "Merchant Center"} (${account.merchantId})`,
       }));
+
+      if (shouldLoadGa4Assets) {
+        const ga4Properties = await withTimeout(
+          getGoogleAnalyticsProperties(decryptedGoogleConnection.decryptedAccessToken),
+          [],
+          8000
+        );
+
+        assets.google.ga4Properties = ga4Properties.map((property) => ({
+          value: property.propertyId,
+          label: `${property.displayName || "GA4 Property"} (${property.propertyId})`,
+        }));
+
+        if (savedGa4PropertyId) {
+          const ga4DataStreams = await withTimeout(
+            getGoogleAnalyticsDataStreams(
+              decryptedGoogleConnection.decryptedAccessToken,
+              savedGa4PropertyId
+            ),
+            [],
+            8000
+          );
+
+          assets.google.ga4DataStreams = ga4DataStreams.map((stream) => ({
+            value: stream.measurementId,
+            label: `${stream.displayName || "GA4 Data Stream"} (${stream.measurementId})`,
+          }));
+        }
+      }
     }
   }
 
@@ -130,7 +178,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
           isActive: true,
         },
         select: {
-          id: true,
+id: true,
           eventName: true,
           conversionName: true,
           conversionId: true,
@@ -147,6 +195,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   return {
     shop: session.shop,
+    navQuery: navParams.toString(),
+    shouldLoadGa4Assets,
     connections: {
       google: getStatus("GOOGLE_ADS"),
       meta: getStatus("META"),
@@ -158,6 +208,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
     assets,
     savedAssetSelections,
     ga4DeliverySettings,
+    testModeSettings,
     googleAdsConversionActions,
   };
 }
@@ -169,6 +220,24 @@ export async function action({ request }: ActionFunctionArgs) {
 
   const formData = await request.formData();
   const actionType = String(formData.get("_action") || "");
+
+  if (actionType === "save_test_mode") {
+    const enabled = String(formData.get("enabled") || "") === "true";
+
+    await saveTestModeSettings({
+      workspaceId: workspace.id,
+      enabled,
+    });
+
+    return Response.json({
+      ok: true,
+      testModeEnabled: enabled,
+      message: enabled
+        ? "Test Mode enabled. Events will be validated/logged before live sending."
+        : "Live Mode enabled. Events can be sent to selected platforms.",
+    });
+  }
+
 
   if (actionType === "save_asset_selection") {
     const platform = String(formData.get("platform") || "");
@@ -515,7 +584,7 @@ const platformConfigs = [
     connectText: "Connect Google",
     oauthPath: "/api/oauth/google-init",
     description: "Select Google Analytics, Google Ads, and Merchant Center assets.",
-    fields: ["GA4 Property", "Google Ads Account / Manager Account", "Google Merchant Center"],
+    fields: ["GA4 Property", "Google Ads Account / Manager Account", "Google Merchant Center", "Google Ads Remarketing"],
   },
   {
     key: "meta",
@@ -566,9 +635,18 @@ export default function ConfigurationPage() {
     assets,
     savedAssetSelections,
     ga4DeliverySettings,
+    testModeSettings,
     googleAdsConversionActions,
   } = useLoaderData<typeof loader>();
-  const [activeModal, setActiveModal] = useState<"ga4" | "conversions" | "feed" | null>(null);
+  const location = useLocation();
+  const navigate = useNavigate();
+  const withNav = (path: string) => {
+    const params = new URLSearchParams(location.search);
+    if (!params.get("shop")) params.set("shop", shop);
+    return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
+  };
+  const withShop = (path: string) => `${path}${path.includes("?") ? "&" : "?"}shop=${encodeURIComponent(shop)}`;
+  const [activeModal, setActiveModal] = useState<"ga4" | "conversions" | "feed" | "remarketing" | null>(null);
   const conversionFetcher = useFetcher();
   const deleteConversionFetcher = useFetcher();
   const deleteConversionResult = deleteConversionFetcher.data as
@@ -598,6 +676,11 @@ export default function ConfigurationPage() {
   const ga4DeliveryResult = ga4DeliveryFetcher.data as
     | { ok?: boolean; error?: string; message?: string }
     | undefined;
+  const testModeFetcher = useFetcher();
+  const testModeResult = testModeFetcher.data as
+    | { ok?: boolean; error?: string; message?: string; testModeEnabled?: boolean }
+    | undefined;
+  const [testModeEnabled, setTestModeEnabled] = useState(Boolean(testModeSettings?.enabled));
   const [ga4DeliveryMode, setGa4DeliveryMode] = useState(
     ga4DeliverySettings?.setting?.deliveryMode === "server" ? "server" : "client"
   );
@@ -615,6 +698,16 @@ export default function ConfigurationPage() {
     selectedAssets["google:Google Ads Account / Manager Account"] || "";
   const merchantCenterValue =
     selectedAssets["google:Google Merchant Center"] || "";
+  const googleRemarketingValue =
+    selectedAssets["google:Google Ads Remarketing"] || "";
+  const clientSideStatus =
+    googleAdsAccountValue || ga4PropertyValue || googleRemarketingValue === "enabled"
+      ? "Active"
+      : "Pending";
+  const serverSideStatus =
+    googleAdsConversionActions.length > 0
+      ? "Active"
+      : "Pending conversion configuration";
 
   const merchantCountryCodes = "AF AX AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ BM BT BO BQ BA BW BV BR IO BN BG BF BI KH CM CA CV KY CF TD CL CN CX CC CO KM CG CD CK CR CI HR CU CW CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KW KG LA LV LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY PE PH PN PL PT PR QA RE RO RU RW BL SH KN LC MF PM VC WS SM ST SA SN RS SC SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH TW TJ TZ TH TL TG TK TO TT TN TR TM TC TV UG UA AE GB UM US UY UZ VU VE VN VG VI WF EH YE ZM ZW"
     .split(" ")
@@ -622,6 +715,244 @@ export default function ConfigurationPage() {
 
   function fieldKey(platformKey: string, field: string) {
     return `${platformKey}:${field}`;
+  }
+
+  function isLockedAssetField(platformKey: string, field: string, value: string) {
+    if (!value) return false;
+
+    return (
+      platformKey === "google" &&
+      [
+        "GA4 Property",
+        "Google Ads Account / Manager Account",
+        "Google Merchant Center",
+      ].includes(field)
+    );
+  }
+
+  function settingKey(platformKey: string, field: string, setting: string) {
+    return `${platformKey}:${field}:${setting}`;
+  }
+
+  function isTrackingFeatureEnabled(platformKey: string, field: string) {
+    const enabledKey = settingKey(platformKey, field, "enabled");
+    const mainKey = fieldKey(platformKey, field);
+
+    if (Object.prototype.hasOwnProperty.call(selectedAssets, enabledKey)) {
+      return selectedAssets[enabledKey] === "true";
+    }
+
+    // GA4 should not be active from stale saved values.
+    if (platformKey === "google" && field === "GA4 Property") {
+      return false;
+    }
+
+    // Backward compatibility for existing selected Google Ads / Merchant settings.
+    if (selectedAssets[mainKey]) {
+      return true;
+    }
+
+    if (
+      platformKey === "google" &&
+      field === "Google Ads Remarketing" &&
+      selectedAssets[mainKey] === "enabled"
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  function supportsServerSide(platformKey: string, field: string) {
+    return (
+      platformKey === "google" &&
+      [
+        "GA4 Property",
+        "Google Ads Account / Manager Account",
+        "Google Ads Remarketing",
+      ].includes(field)
+    );
+  }
+
+  function isServerSideEnabled(platformKey: string, field: string) {
+    return selectedAssets[settingKey(platformKey, field, "server_side")] === "true";
+  }
+
+  function getFeatureLabel(field: string) {
+    if (field === "GA4 Property") return "Enable GA4";
+    if (field === "Google Ads Account / Manager Account") return "Enable Google Ads conversions";
+    if (field === "Google Merchant Center") return "Enable Google Merchant Center feed";
+    if (field === "Google Ads Remarketing") return "Enable Google Ads remarketing";
+    return `Enable ${field}`;
+  }
+
+  function saveSetting(platformKey: string, assetType: string, assetValue: string, assetLabel: string) {
+    const key = `${platformKey}:${assetType}`;
+
+    setSelectedAssets((previous) => ({
+      ...previous,
+      [key]: assetValue,
+    }));
+
+    assetSelectionFetcher.submit(
+      {
+        _action: "save_asset_selection",
+        platform: platformKey,
+        assetType,
+        assetValue,
+        assetLabel,
+      },
+      { method: "post" }
+    );
+  }
+
+  const remarketingEventOptions = [
+    { value: "page_view", label: "Page View" },
+    { value: "view_item_list", label: "View Item List" },
+    { value: "view_item", label: "View Item" },
+    { value: "add_to_cart", label: "Add To Cart" },
+    { value: "remove_from_cart", label: "Remove From Cart" },
+    { value: "view_cart", label: "View Cart" },
+    { value: "begin_checkout", label: "Begin Checkout" },
+    { value: "add_shipping_info", label: "Add Shipping Info" },
+    { value: "add_payment_info", label: "Add Payment Info" },
+    { value: "purchase", label: "Purchase" },
+    { value: "search", label: "Search" },
+  ];
+
+  const ga4EventOptions = [
+    { value: "page_view", label: "Page View" },
+    { value: "view_item_list", label: "View Item List" },
+    { value: "view_item", label: "View Item" },
+    { value: "add_to_cart", label: "Add To Cart" },
+    { value: "remove_from_cart", label: "Remove From Cart" },
+    { value: "view_cart", label: "View Cart" },
+    { value: "begin_checkout", label: "Begin Checkout" },
+    { value: "add_shipping_info", label: "Add Shipping Info" },
+    { value: "add_payment_info", label: "Add Payment Info" },
+    { value: "purchase", label: "Purchase" },
+    { value: "search", label: "Search" },
+  ];
+
+  const deliveryModeOptions = [
+    { value: "client", label: "Client-side only" },
+    { value: "server", label: "Server-side only" },
+    { value: "both", label: "Both client-side and server-side" },
+  ];
+
+  const itemIdFormatOptions = [
+    {
+      value: "shopify_country_product_variant",
+      label: "Shopify_COUNTRY_PRODUCTID_VARIANTID",
+    },
+    {
+      value: "product_variant",
+      label: "PRODUCTID_VARIANTID",
+    },
+    {
+      value: "product_id",
+      label: "PRODUCTID only",
+    },
+    {
+      value: "variant_id",
+      label: "VARIANTID only",
+    },
+    {
+      value: "sku",
+      label: "SKU",
+    },
+  ];
+
+  function getSelectedCsvSetting(settingName: string) {
+    return String(selectedAssets[settingName] || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function updateCsvSetting(
+    platformKey: string,
+    assetType: string,
+    eventName: string,
+    checked: boolean
+  ) {
+    const settingName = `${platformKey}:${assetType}`;
+    const current = new Set(getSelectedCsvSetting(settingName));
+
+    if (checked) {
+      current.add(eventName);
+    } else {
+      current.delete(eventName);
+    }
+
+    const nextEvents = Array.from(current);
+
+    saveSetting(
+      platformKey,
+      assetType,
+      nextEvents.join(","),
+      nextEvents.join(", ")
+    );
+  }
+
+  function getDeliveryMode(platformKey: string, assetType: string) {
+    return selectedAssets[`${platformKey}:${assetType}:delivery_mode`] || "client";
+  }
+
+  function saveDeliveryMode(platformKey: string, assetType: string, deliveryMode: string) {
+    const label =
+      deliveryModeOptions.find((option) => option.value === deliveryMode)?.label ||
+      deliveryMode;
+
+    saveSetting(
+      platformKey,
+      `${assetType}:delivery_mode`,
+      deliveryMode,
+      label
+    );
+  }
+
+  function getItemIdFormat(platformKey: string, assetType: string) {
+    return selectedAssets[`${platformKey}:${assetType}:item_id_format`] || "shopify_country_product_variant";
+  }
+
+  function saveItemIdFormat(platformKey: string, assetType: string, itemIdFormat: string) {
+    const label =
+      itemIdFormatOptions.find((option) => option.value === itemIdFormat)?.label ||
+      itemIdFormat;
+
+    saveSetting(
+      platformKey,
+      `${assetType}:item_id_format`,
+      itemIdFormat,
+      label
+    );
+  }
+
+  function getSelectedRemarketingEvents() {
+    return String(selectedAssets["google:Google Ads Remarketing:events"] || "")
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean);
+  }
+
+  function updateRemarketingEvent(eventName: string, checked: boolean) {
+    const current = new Set(getSelectedRemarketingEvents());
+
+    if (checked) {
+      current.add(eventName);
+    } else {
+      current.delete(eventName);
+    }
+
+    const nextEvents = Array.from(current);
+
+    saveSetting(
+      "google",
+      "Google Ads Remarketing:events",
+      nextEvents.join(","),
+      nextEvents.join(", ")
+    );
   }
 
   function getFieldOptions(platformKey: string, field: string): AssetOption[] {
@@ -635,6 +966,19 @@ export default function ConfigurationPage() {
 
     if (platformKey === "google" && field === "Google Merchant Center") {
       return assets.google.merchantCenters;
+    }
+
+    if (platformKey === "google" && field === "Google Ads Remarketing") {
+      return [
+        {
+          value: "enabled",
+          label: "Enabled - send Google Ads remarketing events",
+        },
+        {
+          value: "disabled",
+          label: "Disabled",
+        },
+      ];
     }
 
     return [];
@@ -653,14 +997,62 @@ export default function ConfigurationPage() {
       return "Merchant Center API pending";
     }
 
+    if (platformKey === "google" && field === "Google Ads Remarketing") {
+      return "Select remarketing status";
+    }
+
     return "Asset loading API pending";
   }
 
   return (
     <main style={styles.page}>
       <section style={styles.hero}>
-        <p style={styles.kicker}>Conversion Tracking</p>
-        <h1 style={styles.title}>Configuration</h1>
+<h1
+          style={{
+            ...styles.title,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            fontSize: 28,
+            lineHeight: 1.2,
+            margin: 0,
+          }}
+        >
+          <img
+            src="/assets/logos/dh-logo.png"
+            alt="DH Conversions"
+            style={{
+              height: 36,
+              width: "auto",
+              maxWidth: 96,
+              objectFit: "contain",
+              display: "block",
+              flexShrink: 0,
+            }}
+          />
+          <span>Configuration</span>
+        </h1>
+        {testModeEnabled && (
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              width: "fit-content",
+              marginTop: 12,
+              borderRadius: 999,
+              padding: "7px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: "#9a3412",
+              background: "#fed7aa",
+              border: "1px solid #fdba74",
+            }}
+          >
+            TEST MODE ACTIVE
+          </div>
+        )}
         <p style={styles.subtitle}>
           Select connected platform assets, configure conversions, and create catalog feeds.
         </p>
@@ -669,6 +1061,125 @@ export default function ConfigurationPage() {
       <section style={styles.notice}>
         Tracking IDs, conversion labels, pixels, catalogs, and feed settings will be selected from connected platform accounts.
         Manual ID entry is not required.
+      </section>
+
+      <section
+        style={{
+          ...styles.statusBox,
+          borderColor: testModeEnabled ? "#fb923c" : "#d1d5db",
+          background: testModeEnabled ? "#fff7ed" : "white",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 16,
+            alignItems: "flex-start",
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <h2 style={styles.sectionTitle}>Test Mode</h2>
+            <p style={{ margin: "6px 0 0", color: "#4b5563", lineHeight: 1.6 }}>
+              Enable Test Mode before installing on a live store. Events will be collected,
+              validated, and logged safely before live platform sending.
+            </p>
+          </div>
+
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              borderRadius: 999,
+              padding: "7px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: testModeEnabled ? "#9a3412" : "#166534",
+              background: testModeEnabled ? "#fed7aa" : "#dcfce7",
+              border: testModeEnabled ? "1px solid #fdba74" : "1px solid #86efac",
+            }}
+          >
+            {testModeEnabled ? "Test Mode Active" : "Live Mode"}
+          </span>
+        </div>
+
+        <testModeFetcher.Form
+          method="post"
+          style={{
+            marginTop: 18,
+            display: "grid",
+            gap: 12,
+          }}
+        >
+          <input type="hidden" name="_action" value="save_test_mode" />
+
+          <label
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "flex-start",
+              fontWeight: 700,
+              color: "#111827",
+            }}
+          >
+            <input
+              type="checkbox"
+              name="enabled"
+              value="true"
+              checked={testModeEnabled}
+              onChange={(event) => setTestModeEnabled(event.currentTarget.checked)}
+              style={{ marginTop: 3 }}
+            />
+            <span>
+              Enable Test Mode
+              <small
+                style={{
+                  display: "block",
+                  marginTop: 4,
+                  color: "#6b7280",
+                  fontWeight: 500,
+                  lineHeight: 1.5,
+                }}
+              >
+                When enabled, the app should validate and log events before live sending.
+                Public URLs or browser payloads cannot control this setting.
+              </small>
+            </span>
+          </label>
+
+          {testModeResult?.message && (
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                color: testModeResult.ok ? "#166534" : "#991b1b",
+                background: testModeResult.ok ? "#dcfce7" : "#fee2e2",
+                border: testModeResult.ok ? "1px solid #86efac" : "1px solid #fecaca",
+                fontWeight: 700,
+              }}
+            >
+              {testModeResult.message}
+            </div>
+          )}
+
+          <div>
+            <button
+              type="submit"
+              disabled={testModeFetcher.state !== "idle"}
+              style={{
+                ...styles.primaryButton,
+                border: "none",
+                cursor: testModeFetcher.state === "idle" ? "pointer" : "not-allowed",
+                opacity: testModeFetcher.state === "idle" ? 1 : 0.7,
+              }}
+            >
+              {testModeFetcher.state === "idle" ? "Save Test Mode" : "Saving..."}
+            </button>
+          </div>
+        </testModeFetcher.Form>
       </section>
 
       <section style={styles.statusBox}>
@@ -761,30 +1272,93 @@ export default function ConfigurationPage() {
                       {platform.fields.map((field) => {
                         const key = fieldKey(platform.key, field);
                         const options = getFieldOptions(platform.key, field);
+                        const isEnabled = isTrackingFeatureEnabled(platform.key, field);
+                        const selectedValue = selectedAssets[key] || "";
+                        const isLocked = isLockedAssetField(platform.key, field, selectedValue);
+                        const isDisabled = !isEnabled || isLocked;
+                        const displayOptions =
+                          selectedValue && !options.some((option) => option.value === selectedValue)
+                            ? [
+                                {
+                                  value: selectedValue,
+                                  label: selectedValue,
+                                },
+                                ...options,
+                              ]
+                            : options;
 
                         return (
-                          <div key={field} style={styles.assetFieldBlock}>
-                            <label style={styles.label}>
+                          <div key={field} style={styles.fieldWithAction}>
+                            <div
+                              style={{
+                                display: "grid",
+                                gap: 8,
+                                padding: "10px 12px",
+                                border: "1px solid #e5e7eb",
+                                borderRadius: 10,
+                                backgroundColor: "#f9fafb",
+                                width: "100%",
+                                boxSizing: "border-box",
+                                gridColumn: "1 / 2",
+                              }}
+                            >
+                              <label
+                                style={{
+                                  display: "flex",
+                                  alignItems: "center",
+                                  gap: 8,
+                                  fontWeight: 700,
+                                  color: "#111827",
+                                }}
+                              >
+                                <input
+                                  type="checkbox"
+                                  checked={isEnabled}
+                                  onChange={(event) => {
+                                    saveSetting(
+                                      platform.key,
+                                      `${field}:enabled`,
+                                      event.currentTarget.checked ? "true" : "false",
+                                      event.currentTarget.checked ? "Enabled" : "Disabled"
+                                    );
+                                  }}
+                                />
+                                {getFeatureLabel(field)}
+                              </label>
+
+                              <small style={{ color: "#6b7280", lineHeight: 1.5 }}>
+                              </small>
+                            </div>
+
+                            <label style={{ ...styles.label, width: "100%", boxSizing: "border-box", gridColumn: "1 / 2" }}>
                               {field}
                               <select
-                                value={selectedAssets[key] || ""}
+                                value={selectedValue}
+                                disabled={isDisabled}
+                                title={
+                                  !isEnabled
+                                    ? "Enable this option first."
+                                    : isLocked
+                                      ? "This account is locked after selection. Disconnect and reconnect Google to change it."
+                                      : undefined
+                                }
                                 onChange={(event) => {
-                                  const selectedValue = event.target.value;
+                                  const nextValue = event.target.value;
                                   const selectedLabel =
                                     event.currentTarget.options[event.currentTarget.selectedIndex]?.text || "";
 
                                   setSelectedAssets((previous) => ({
                                     ...previous,
-                                    [key]: selectedValue,
+                                    [key]: nextValue,
                                   }));
 
-                                  if (selectedValue) {
+                                  if (nextValue) {
                                     assetSelectionFetcher.submit(
                                       {
                                         _action: "save_asset_selection",
                                         platform: platform.key,
                                         assetType: field,
-                                        assetValue: selectedValue,
+                                        assetValue: nextValue,
                                         assetLabel: selectedLabel,
                                       },
                                       { method: "post" }
@@ -795,25 +1369,46 @@ export default function ConfigurationPage() {
                                     }
                                   }
                                 }}
-                                style={styles.select}
+                                style={
+                                  isDisabled
+                                    ? {
+                                        ...styles.select,
+                                        backgroundColor: "#f3f4f6",
+                                        color: "#6b7280",
+                                        cursor: "not-allowed",
+                                      }
+                                    : styles.select
+                                }
                               >
                                 <option value="">
-                                  {options.length ? `Select ${field}` : getEmptyOptionText(platform.key, field)}
+                                  {displayOptions.length ? `Select ${field}` : getEmptyOptionText(platform.key, field)}
                                 </option>
 
-                                {options.map((option) => (
+                                {displayOptions.map((option) => (
                                   <option key={option.value} value={option.value}>
                                     {option.label}
                                   </option>
                                 ))}
                               </select>
+
+                              {!isEnabled && (
+                                <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                                  Enable this option first to select or configure it.
+                                </small>
+                              )}
+
+                              {isEnabled && isLocked && (
+                                <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                                  Locked after selection. To change this account, disconnect Google and connect again.
+                                </small>
+                              )}
                             </label>
 
                             {platform.key === "google" && field === "GA4 Property" && (
                               <button
                                 type="button"
-                                style={selectedAssets[key] ? styles.inlineActionButton : styles.disabledButton}
-                                disabled={!selectedAssets[key]}
+                                style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
+                                disabled={!isEnabled || !selectedValue}
                                 onClick={() => setActiveModal("ga4")}
                               >
                                 Configuration
@@ -823,8 +1418,8 @@ export default function ConfigurationPage() {
                             {platform.key === "google" && field === "Google Ads Account / Manager Account" && (
                               <button
                                 type="button"
-                                style={selectedAssets[key] ? styles.inlineActionButton : styles.disabledButton}
-                                disabled={!selectedAssets[key]}
+                                style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
+                                disabled={!isEnabled || !selectedValue}
                                 onClick={() => setActiveModal("conversions")}
                               >
                                 Conversions
@@ -834,16 +1429,59 @@ export default function ConfigurationPage() {
                             {platform.key === "google" && field === "Google Merchant Center" && (
                               <button
                                 type="button"
-                                style={selectedAssets[key] ? styles.inlineActionButton : styles.disabledButton}
-                                disabled={!selectedAssets[key]}
+                                style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
+                                disabled={!isEnabled || !selectedValue}
                                 onClick={() => setActiveModal("feed")}
                               >
                                 Create Feed
                               </button>
                             )}
+
+                            {platform.key === "google" && field === "Google Ads Remarketing" && (
+                              <div style={{ display: "grid", gap: 10, width: "100%" }}>
+                                <span
+                                  style={
+                                    isEnabled && selectedValue === "enabled"
+                                      ? styles.connectedBadge
+                                      : styles.pendingBadge
+                                  }
+                                >
+                                  {isEnabled && selectedValue === "enabled"
+                                    ? "Remarketing Active"
+                                    : "Remarketing Disabled"}
+                                </span>
+
+                                {isEnabled && selectedValue === "enabled" && (
+                                  <button
+                                    type="button"
+                                    style={styles.inlineActionButton}
+                                    onClick={() => setActiveModal("remarketing")}
+                                  >
+                                    Remarketing Configuration
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
+
+                            {platform.key === "google" && (
+                              <div
+                                style={{
+                                  gridColumn: "1 / -1",
+                                  padding: "10px 12px",
+                                  borderTop: "1px solid #d1fae5",
+                                  color: "#4b5563",
+                                  fontSize: 12,
+                                  lineHeight: 1.6,
+                                }}
+                              >
+                                <strong>Client Side:</strong> Events are sent from the customer’s browser or Shopify Customer Events pixel.
+                                <br />
+                                <strong>Server Side:</strong> Events are collected by the app and sent from the backend/server to the selected platform.
+                              </div>
+                            )}
                     </div>
 
                   </>
@@ -866,11 +1504,110 @@ export default function ConfigurationPage() {
             <strong>Pending live event</strong>
           </div>
           <div style={styles.statusRow}>
-            <span>Last Event Forwarded</span>
-            <strong>Pending platform configuration</strong>
+            <span>Client-side Tracking</span>
+            <strong>{clientSideStatus}</strong>
+          </div>
+          <div style={styles.statusRow}>
+            <span>Server-side Tracking</span>
+            <strong>{serverSideStatus}</strong>
+          </div>
+          <div style={styles.statusRow}>
+            <span>Remarketing</span>
+            <strong>{googleRemarketingValue === "enabled" ? "Active" : "Disabled"}</strong>
           </div>
         </div>
       </section>
+
+
+      {activeModal === "remarketing" && (
+        <Modal title="Google Ads Remarketing Configuration" onClose={() => setActiveModal(null)}>
+          <div style={styles.modalGrid}>
+            <label style={styles.label}>
+              Delivery Mode
+              <select
+                style={styles.select}
+                value={getDeliveryMode("google", "Google Ads Remarketing")}
+                onChange={(event) =>
+                  saveDeliveryMode("google", "Google Ads Remarketing", event.currentTarget.value)
+                }
+              >
+                {deliveryModeOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={styles.label}>
+              Item ID Format
+              <select
+                style={styles.select}
+                value={getItemIdFormat("google", "Google Ads Remarketing")}
+                onChange={(event) =>
+                  saveItemIdFormat("google", "Google Ads Remarketing", event.currentTarget.value)
+                }
+              >
+                {itemIdFormatOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                For best product matching, use the same item ID format as your Merchant Center feed.
+              </small>
+            </label>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <strong>Remarketing Events</strong>
+
+              <div style={styles.checkGrid}>
+                {remarketingEventOptions.map((eventOption) => {
+                  const checked = getSelectedCsvSetting("google:Google Ads Remarketing:events").includes(
+                    eventOption.value
+                  );
+
+                  return (
+                    <label key={eventOption.value} style={styles.checkboxLabel}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) =>
+                          updateCsvSetting(
+                            "google",
+                            "Google Ads Remarketing:events",
+                            eventOption.value,
+                            event.currentTarget.checked
+                          )
+                        }
+                      />
+                      {eventOption.label}
+                    </label>
+                  );
+                })}
+              </div>
+
+              {getSelectedCsvSetting("google:Google Ads Remarketing:events").length === 0 && (
+                <small style={{ color: "#b45309", fontWeight: 700 }}>
+                  Select at least one remarketing event.
+                </small>
+              )}
+            </div>
+
+            <p style={{ color: "#6b7280", lineHeight: 1.6 }}>
+              Client Side sends remarketing events from the browser/customer pixel.
+              Server Side sends selected remarketing events from the app backend.
+            </p>
+
+            <div style={styles.modalActions}>
+              <button type="button" style={styles.primaryButton} onClick={() => setActiveModal(null)}>
+                Done
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {activeModal === "ga4" && (
         <Modal title="GA4 Configuration" onClose={() => setActiveModal(null)}>
@@ -955,6 +1692,67 @@ export default function ConfigurationPage() {
                 {ga4DeliveryResult.error}
               </div>
             )}
+
+            <label style={styles.label}>
+              GA4 Item ID Format
+              <select
+                style={styles.select}
+                value={getItemIdFormat("google", "GA4 Property")}
+                onChange={(event) =>
+                  saveItemIdFormat("google", "GA4 Property", event.currentTarget.value)
+                }
+              >
+                {itemIdFormatOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                For best product matching, use the same item ID format as your Merchant Center feed.
+              </small>
+            </label>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <strong>GA4 Events to Send</strong>
+
+              <div style={styles.checkGrid}>
+                {ga4EventOptions.map((eventOption) => {
+                  const checked = getSelectedCsvSetting("google:GA4 Property:events").includes(
+                    eventOption.value
+                  );
+
+                  return (
+                    <label key={eventOption.value} style={styles.checkboxLabel}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) =>
+                          updateCsvSetting(
+                            "google",
+                            "GA4 Property:events",
+                            eventOption.value,
+                            event.currentTarget.checked
+                          )
+                        }
+                      />
+                      {eventOption.label}
+                    </label>
+                  );
+                })}
+              </div>
+
+              {getSelectedCsvSetting("google:GA4 Property:events").length === 0 && (
+                <small style={{ color: "#b45309", fontWeight: 700 }}>
+                  Select at least one GA4 event.
+                </small>
+              )}
+            </div>
+
+            <p style={{ color: "#6b7280", lineHeight: 1.6 }}>
+              Client Side sends events from the browser/customer pixel.
+              Server Side sends selected events from the app backend using the selected GA4 configuration.
+            </p>
 
             <div style={styles.modalActions}>
               <button type="button" style={styles.secondaryButton} onClick={() => setActiveModal(null)}>
@@ -1054,6 +1852,30 @@ export default function ConfigurationPage() {
                 <option value="fixed">Use fixed value</option>
                 <option value="none">No value</option>
               </select>
+            </label>
+
+            <label style={styles.label}>
+              Google Ads Item ID Format
+              <select
+                style={styles.select}
+                value={getItemIdFormat("google", "Google Ads Account / Manager Account")}
+                onChange={(event) =>
+                  saveItemIdFormat(
+                    "google",
+                    "Google Ads Account / Manager Account",
+                    event.currentTarget.value
+                  )
+                }
+              >
+                {itemIdFormatOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                For best product matching, use the same item ID format as your Merchant Center feed.
+              </small>
             </label>
 
             <label style={styles.label}>
@@ -1328,6 +2150,79 @@ export default function ConfigurationPage() {
         </Modal>
       )}
 
+          <section
+        style={{
+          marginTop: 24,
+          padding: 18,
+          border: "1px solid #e5e7eb",
+          borderRadius: 12,
+          background: "#f9fafb",
+        }}
+      >
+        <h3 style={{ marginTop: 0 }}>Configuration tools</h3>
+
+        <p style={{ color: "#4b5563", lineHeight: 1.6 }}>
+          To keep the app faster, Google asset lists are not loaded automatically on every visit.
+          Load them only when you need to refresh GA4, Google Ads, or Merchant Center selections.
+        </p>
+
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <button
+            type="button"
+            onClick={() => navigate(withNav("/app/settings?loadGa4Assets=true"))}
+            style={{
+              display: "inline-block",
+              padding: "10px 16px",
+              backgroundColor: "#2563eb",
+              color: "white",
+              textDecoration: "none",
+              borderRadius: 8,
+              fontWeight: 700,
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            Load GA4 assets
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigate(withNav("/app/delivery-logs"))}
+            style={{
+              display: "inline-block",
+              padding: "10px 16px",
+              backgroundColor: "#111827",
+              color: "white",
+              textDecoration: "none",
+              borderRadius: 8,
+              fontWeight: 700,
+              border: "none",
+              cursor: "pointer",
+            }}
+          >
+            Open Event Delivery Logs
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigate(withNav("/app/help"))}
+            style={{
+              display: "inline-block",
+              padding: "10px 16px",
+              backgroundColor: "white",
+              color: "#111827",
+              border: "1px solid #d1d5db",
+              textDecoration: "none",
+              borderRadius: 8,
+              fontWeight: 700,
+              cursor: "pointer",
+            }}
+          >
+            Help / Documentation
+          </button>
+        </div>
+      </section>
+
     </main>
   );
 }
@@ -1428,8 +2323,8 @@ const styles = {
     marginTop: 14,
   },
   label: {
+    gap: 7,
     display: "grid",
-    gap: 6,
     color: "#374151",
     fontWeight: 700,
     fontSize: 14,

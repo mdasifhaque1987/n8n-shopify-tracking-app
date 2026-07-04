@@ -1,5 +1,6 @@
 import db from "../db.server";
 import { stripUrlQuery, type NormalizedTrackingEvent } from "./normalize-event.server";
+import { sanitizeForEventLog } from "./security/event-security.server";
 
 function hasString(value: unknown): boolean {
   return typeof value === "string" && value.trim().length > 0;
@@ -123,7 +124,7 @@ export async function createEventDeliveryLog(data: {
       status: data.status,
       message: data.message,
       requestPayload: sanitizeTrackingEvent(data.event),
-      responsePayload: data.responsePayload || null,
+      responsePayload: data.responsePayload ? (sanitizeForEventLog(data.responsePayload) as any) : null,
     },
   });
 }

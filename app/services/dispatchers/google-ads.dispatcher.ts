@@ -41,6 +41,11 @@ function getDataManagerValidateOnly() {
   return process.env.GOOGLE_ADS_DATA_MANAGER_VALIDATE_ONLY === "true";
 }
 
+type GoogleAdsDispatchOptions = {
+  validateOnly?: boolean;
+  testMode?: boolean;
+};
+
 function stringValue(value: unknown) {
   if (typeof value !== "string") return "";
   return value.trim();
@@ -206,7 +211,8 @@ async function getGoogleAccessToken(workspaceId: string) {
 
 async function dispatchPurchaseToGoogleAdsDataManager(
   event: NormalizedTrackingEvent,
-  workspaceId: string
+  workspaceId: string,
+  options: GoogleAdsDispatchOptions = {}
 ): Promise<GoogleAdsDispatchResult> {
   try {
     if (event.event_name !== "purchase") {
@@ -300,6 +306,10 @@ async function dispatchPurchaseToGoogleAdsDataManager(
       dataManagerEvent.clientId = event.client_id;
     }
 
+    const validateOnly = Boolean(
+      options.validateOnly || options.testMode || getDataManagerValidateOnly()
+    );
+
     const body = {
       destinations: [
         {
@@ -315,7 +325,7 @@ async function dispatchPurchaseToGoogleAdsDataManager(
         },
       ],
       events: [dataManagerEvent],
-      validateOnly: getDataManagerValidateOnly(),
+      validateOnly,
     };
 
     const response = await fetch(
@@ -347,7 +357,7 @@ async function dispatchPurchaseToGoogleAdsDataManager(
     return {
       success: true,
       status: "success",
-      message: getDataManagerValidateOnly()
+      message: validateOnly
         ? "Google Data Manager purchase validation succeeded."
         : "Google Data Manager purchase sent successfully.",
       responsePayload,
@@ -363,7 +373,8 @@ async function dispatchPurchaseToGoogleAdsDataManager(
 
 async function dispatchPurchaseToGoogleAdsApi(
   event: NormalizedTrackingEvent,
-  workspaceId: string
+  workspaceId: string,
+  options: GoogleAdsDispatchOptions = {}
 ): Promise<GoogleAdsDispatchResult> {
   try {
     if (event.event_name !== "purchase") {
@@ -466,7 +477,7 @@ async function dispatchPurchaseToGoogleAdsApi(
     const body = {
       conversions: [conversion],
       partialFailure: true,
-      validateOnly: false,
+      validateOnly: Boolean(options.validateOnly || options.testMode),
     };
 
     const apiVersion = getGoogleAdsApiVersion();
@@ -517,7 +528,9 @@ async function dispatchPurchaseToGoogleAdsApi(
     return {
       success: true,
       status: "success",
-      message: "Google Ads server-side purchase sent successfully.",
+      message: Boolean(options.validateOnly || options.testMode)
+        ? "Google Ads server-side purchase validation succeeded."
+        : "Google Ads server-side purchase sent successfully.",
       responsePayload,
     };
   } catch (error) {
@@ -531,7 +544,8 @@ async function dispatchPurchaseToGoogleAdsApi(
 
 export async function dispatchPurchaseToGoogleAds(
   event: NormalizedTrackingEvent,
-  workspaceId: string
+  workspaceId: string,
+  options: GoogleAdsDispatchOptions = {}
 ): Promise<GoogleAdsDispatchResult> {
   if (process.env.GOOGLE_ADS_SERVER_PURCHASE_ENABLED !== "true") {
     return {
@@ -544,15 +558,16 @@ export async function dispatchPurchaseToGoogleAds(
   const apiMode = getServerApiMode();
 
   if (apiMode === "google_ads_api") {
-    return dispatchPurchaseToGoogleAdsApi(event, workspaceId);
+    return dispatchPurchaseToGoogleAdsApi(event, workspaceId, options);
   }
 
-  return dispatchPurchaseToGoogleAdsDataManager(event, workspaceId);
+  return dispatchPurchaseToGoogleAdsDataManager(event, workspaceId, options);
 }
 
 export async function dispatchToGoogleAds(
   event: NormalizedTrackingEvent,
-  workspaceId: string
+  workspaceId: string,
+  options: GoogleAdsDispatchOptions = {}
 ): Promise<GoogleAdsDispatchResult> {
-  return dispatchPurchaseToGoogleAds(event, workspaceId);
+  return dispatchPurchaseToGoogleAds(event, workspaceId, options);
 }

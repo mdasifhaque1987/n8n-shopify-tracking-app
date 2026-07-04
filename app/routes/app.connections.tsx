@@ -1,4 +1,4 @@
-import { Form, redirect, useLoaderData } from "react-router";
+import { Form, redirect, useLoaderData, useLocation } from "react-router";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
@@ -6,10 +6,12 @@ import {
   deactivateConnection,
   getWorkspaceConnections,
 } from "../services/platform-connection.server";
+import { getTestModeSettings } from "../services/test-mode.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
+  const testModeSettings = await getTestModeSettings(workspace.id);
   const savedConnections = await getWorkspaceConnections(workspace.id);
 
   const getStatus = (platform: string) => {
@@ -24,8 +26,21 @@ export async function loader({ request }: LoaderFunctionArgs) {
     };
   };
 
+  const url = new URL(request.url);
+  const navParams = new URLSearchParams();
+  const host = url.searchParams.get("host");
+  const embedded = url.searchParams.get("embedded");
+  const locale = url.searchParams.get("locale");
+
+  navParams.set("shop", session.shop);
+  if (host) navParams.set("host", host);
+  if (embedded) navParams.set("embedded", embedded);
+  if (locale) navParams.set("locale", locale);
+
   return {
+    testModeSettings,
     shop: session.shop,
+    navQuery: navParams.toString(),
     customerEnrichment: {
       enabled: process.env.SHOPIFY_ORDER_ENRICHMENT_ENABLED === "true",
     },
@@ -41,7 +56,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 }
 
 export async function action({ request }: ActionFunctionArgs) {
-  await authenticate.admin(request);
+  const { session } = await authenticate.admin(request);
 
   const formData = await request.formData();
   const connectionId = String(formData.get("connectionId") || "");
@@ -50,63 +65,135 @@ export async function action({ request }: ActionFunctionArgs) {
     await deactivateConnection(connectionId);
   }
 
-  return redirect("/app/connections");
+  return redirect(`/app/connections?shop=${encodeURIComponent(session.shop)}`);
 }
 
 export default function ConnectionsPage() {
-  const { shop, connections, customerEnrichment } = useLoaderData<typeof loader>();
+  const { shop, navQuery, connections, customerEnrichment, testModeSettings } = useLoaderData<typeof loader>();
+  const testModeEnabled = Boolean(testModeSettings?.enabled);
+  const location = useLocation();
+  const withNav = (path: string) => {
+    const params = new URLSearchParams(location.search);
+    if (!params.get("shop")) params.set("shop", shop);
+    return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
+  };
+  const withShop = (path: string) =>
+    `${path}${path.includes("?") ? "&" : "?"}shop=${encodeURIComponent(shop)}`;
 
   const platforms = [
     {
       id: "google",
       name: "Google",
       description: "Connect Google Analytics, Google Ads, and Google Merchant Center",
-      icon: "🔵",
-      oauthUrl: `/api/oauth/google-init?shop=${shop}`,
+      logo: "/assets/logos/platforms/google.svg",
+      oauthUrl: `/api/oauth/google-init?shop=${encodeURIComponent(shop)}`,
     },
     {
       id: "meta",
       name: "Meta (Facebook)",
       description: "Connect Facebook Pixel, Instagram, and Meta Business",
-      icon: "📘",
-      oauthUrl: `/api/oauth/meta-init?shop=${shop}`,
+      logo: "/assets/logos/platforms/meta.svg",
+      oauthUrl: `/api/oauth/meta-init?shop=${encodeURIComponent(shop)}`,
     },
     {
       id: "tiktok",
       name: "TikTok",
       description: "Connect TikTok Pixel and TikTok Ads",
-      icon: "🎵",
-      oauthUrl: `/api/oauth/tiktok-init?shop=${shop}`,
+      logo: "/assets/logos/platforms/tiktok.svg",
+      oauthUrl: `/api/oauth/tiktok-init?shop=${encodeURIComponent(shop)}`,
     },
     {
       id: "pinterest",
       name: "Pinterest",
       description: "Connect Pinterest Tag and Pinterest Ads",
-      icon: "📌",
-      oauthUrl: `/api/oauth/pinterest-init?shop=${shop}`,
+      logo: "/assets/logos/platforms/pinterest.svg",
+      oauthUrl: `/api/oauth/pinterest-init?shop=${encodeURIComponent(shop)}`,
     },
     {
       id: "microsoft",
       name: "Microsoft Ads",
       description: "Connect Bing UET and Microsoft Advertising",
-      icon: "🪟",
-      oauthUrl: `/api/oauth/microsoft-init?shop=${shop}`,
+      logo: "/assets/logos/platforms/microsoft.svg",
+      oauthUrl: `/api/oauth/microsoft-init?shop=${encodeURIComponent(shop)}`,
     },
     {
       id: "linkedin",
       name: "LinkedIn",
       description: "Connect LinkedIn Insight Tag and LinkedIn Ads",
-      icon: "💼",
-      oauthUrl: `/api/oauth/linkedin-init?shop=${shop}`,
+      logo: "/assets/logos/platforms/linkedin.svg",
+      oauthUrl: `/api/oauth/linkedin-init?shop=${encodeURIComponent(shop)}`,
     },
   ];
 
   return (
     <main style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
-      <h1>Platform Connections</h1>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 8 }}>
+
+        <h1
+          style={{
+            ...styles.title,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            fontSize: 28,
+            lineHeight: 1.2,
+            margin: 0,
+          }}
+        >
+          <img
+            src="/assets/logos/dh-logo.png"
+            alt="DH Conversions"
+            style={{
+              height: 36,
+              width: "auto",
+              maxWidth: 96,
+              objectFit: "contain",
+              display: "block",
+              flexShrink: 0,
+            }}
+          />
+          <span>Platform Connections</span>
+        </h1>
+        {testModeEnabled && (
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              width: "fit-content",
+              marginTop: 12,
+              borderRadius: 999,
+              padding: "7px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: "#9a3412",
+              background: "#fed7aa",
+              border: "1px solid #fdba74",
+            }}
+          >
+            TEST MODE ACTIVE
+          </div>
+        )}
+      </div>
+
       <p style={{ marginBottom: 24, color: "#666" }}>
         Connect, reconnect, or disconnect advertising platforms used for tracking and catalog sync.
       </p>
+
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 }}>
+        <a href={withNav("/app/settings")} style={styles.secondaryLink}>
+          Configuration
+        </a>
+
+        <a href={withNav("/app/delivery-logs")} style={styles.secondaryLink}>
+          Event Delivery Logs
+        </a>
+
+        <a href={withNav("/app/help")} style={styles.secondaryLink}>
+          Help / Documentation
+        </a>
+      </div>
 
       <div
         style={{
@@ -139,16 +226,9 @@ export default function ConnectionsPage() {
             : "Shopify order customer enrichment is disabled until Protected Customer Data access is approved by Shopify."}
         </p>
 
-        <p style={{ margin: "0 0 8px", color: "#4b5563" }}>
+        <p style={{ margin: 0, color: "#4b5563" }}>
           Google Ads Data Manager purchase sending still works using click ID attribution and ecommerce data.
         </p>
-
-        {!customerEnrichment.enabled && (
-          <p style={{ margin: 0, color: "#4b5563" }}>
-            After Shopify approves Protected Customer Data access, set{" "}
-            <code>SHOPIFY_ORDER_ENRICHMENT_ENABLED=true</code> and restart the app.
-          </p>
-        )}
       </div>
 
       <div
@@ -173,9 +253,24 @@ export default function ConnectionsPage() {
               }}
             >
               <div style={{ display: "flex", alignItems: "center", marginBottom: 12 }}>
-                <span style={{ fontSize: 32, marginRight: 12 }}>{platform.icon}</span>
+                <img
+                  src={platform.logo}
+                  alt={`${platform.name} logo`}
+                  style={{
+                    width: 36,
+                    height: 36,
+                    objectFit: "contain",
+                    marginRight: 12,
+                    backgroundColor: "white",
+                    borderRadius: 8,
+                    padding: 4,
+                    border: "1px solid #e5e7eb",
+                  }}
+                />
+
                 <div>
                   <h3 style={{ margin: 0 }}>{platform.name}</h3>
+
                   {isConnected && connection.accountName && (
                     <p style={{ margin: "4px 0 0", fontSize: 12, color: "#166534" }}>
                       Connected: {connection.accountName}
@@ -240,6 +335,7 @@ export default function ConnectionsPage() {
 
       <div style={styles.notice}>
         <h3 style={{ marginTop: 0, color: "#c2410c" }}>🔐 OAuth Authentication</h3>
+
         <p style={{ marginBottom: 0, color: "#9a3412" }}>
           Clicking Connect or Reconnect opens a new tab to authenticate with the platform.
           After successful authentication, you will be redirected back to the Shopify app.
@@ -260,6 +356,17 @@ const styles = {
     fontSize: 14,
     fontWeight: 600,
   },
+  secondaryLink: {
+    display: "inline-block",
+    padding: "8px 16px",
+    backgroundColor: "white",
+    color: "#111827",
+    border: "1px solid #d1d5db",
+    textDecoration: "none",
+    borderRadius: 4,
+    fontSize: 14,
+    fontWeight: 600,
+  },
   dangerButton: {
     padding: "8px 16px",
     backgroundColor: "#dc2626",
@@ -271,10 +378,10 @@ const styles = {
     cursor: "pointer",
   },
   notice: {
-    marginTop: 32,
+    marginTop: 24,
     padding: 16,
+    border: "1px solid #fed7aa",
     backgroundColor: "#fff7ed",
-    border: "1px solid #fdba74",
     borderRadius: 8,
   },
 };

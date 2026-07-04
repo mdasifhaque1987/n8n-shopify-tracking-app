@@ -5,6 +5,11 @@ const TRACK_URL = "https://tracking.datahatches.com/api/events/track";
 const GA4_COLLECT_URL = "https://www.google-analytics.com/g/collect";
 const GOOGLE_ADS_CONVERSION_URL = "https://www.googleadservices.com/pagead/conversion";
 
+const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
+const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
+const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
+const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+
 let cachedConfig = null;
 
 async function getConfig(shop) {
@@ -26,6 +31,101 @@ function getShop(event) {
     return "";
   }
 }
+
+
+function isGaStyleClientId(value) {
+  return typeof value === "string" && /^\d+\.\d+$/.test(value);
+}
+
+function createGaStyleClientId() {
+  var first = Math.floor(100000000 + Math.random() * 900000000);
+  var second = Math.floor(Date.now() / 1000);
+
+  return String(first) + "." + String(second);
+}
+
+async function storageGet(browser, key) {
+  try {
+    if (
+      browser &&
+      browser.localStorage &&
+      typeof browser.localStorage.getItem === "function"
+    ) {
+      return await browser.localStorage.getItem(key);
+    }
+  } catch (e) {
+    console.log("[DH Tracking Pixel] storage get error", key, e);
+  }
+
+  return null;
+}
+
+async function storageSet(browser, key, value) {
+  try {
+    if (
+      browser &&
+      browser.localStorage &&
+      typeof browser.localStorage.setItem === "function"
+    ) {
+      await browser.localStorage.setItem(key, String(value));
+      return true;
+    }
+  } catch (e) {
+    console.log("[DH Tracking Pixel] storage set error", key, e);
+  }
+
+  return false;
+}
+
+async function getOrCreateGaClientId(browser, fallbackClientId) {
+  var stored = await storageGet(browser, DH_GA_CLIENT_ID_KEY);
+
+  if (isGaStyleClientId(stored)) {
+    return stored;
+  }
+
+  if (isGaStyleClientId(fallbackClientId)) {
+    await storageSet(browser, DH_GA_CLIENT_ID_KEY, fallbackClientId);
+    return fallbackClientId;
+  }
+
+  var generated = createGaStyleClientId();
+
+  await storageSet(browser, DH_GA_CLIENT_ID_KEY, generated);
+
+  return generated;
+}
+
+async function getOrCreateGaSessionId(browser) {
+  var nowMs = Date.now();
+  var nowSeconds = Math.floor(nowMs / 1000);
+  var storedSessionId = await storageGet(browser, DH_GA_SESSION_ID_KEY);
+  var storedSessionTs = Number(await storageGet(browser, DH_GA_SESSION_TS_KEY) || 0);
+  var isExpired =
+    !storedSessionId ||
+    !storedSessionTs ||
+    nowMs - storedSessionTs > DH_GA_SESSION_TIMEOUT_MS;
+
+  var sessionId = isExpired ? String(nowSeconds) : String(storedSessionId);
+
+  await storageSet(browser, DH_GA_SESSION_ID_KEY, sessionId);
+  await storageSet(browser, DH_GA_SESSION_TS_KEY, String(nowMs));
+
+  return sessionId;
+}
+
+async function getGaIdentity(browser, event) {
+  var fallbackClientId = event && event.clientId ? String(event.clientId) : "";
+  var clientId = await getOrCreateGaClientId(browser, fallbackClientId);
+  var sessionId = await getOrCreateGaSessionId(browser);
+
+  return {
+    clientId: clientId,
+    sessionId: sessionId,
+    shopifyClientId: fallbackClientId,
+  };
+}
+
 
 function sendToServer(payload) {
   try {
@@ -661,6 +761,7 @@ async function buildPayload(event, config, browser) {
   const attribution = await getAttribution(event, browser);
   const customer = await getCustomerForEvent(data, browser);
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
+  const gaIdentity = await getGaIdentity(browser, event);
 
   return {
     event_id: event.id,
@@ -669,7 +770,9 @@ async function buildPayload(event, config, browser) {
     event_name: mapped.ga4,
     ga4_event: mapped.ga4,
     meta_event: mapped.meta,
-    client_id: event.clientId,
+    client_id: gaIdentity.clientId,
+    session_id: gaIdentity.sessionId,
+    shopify_client_id: gaIdentity.shopifyClientId,
     timestamp: event.timestamp,
     event_time: event.timestamp,
     page_location: event.context?.window?.location?.href,
@@ -685,7 +788,11 @@ async function buildPayload(event, config, browser) {
     customer,
     ecommerce,
     config,
-    raw: data,
+    raw: {
+      client_id: gaIdentity.clientId,
+      session_id: gaIdentity.sessionId,
+      shopify_client_id: gaIdentity.shopifyClientId,
+    },
   };
 }
 
@@ -701,6 +808,11 @@ function buildGa4Url(payload, measurementId) {
   params.set("v", "2");
   params.set("tid", measurementId);
   params.set("cid", payload.client_id || "dh_client");
+
+  if (payload.session_id) {
+    params.set("sid", String(payload.session_id));
+  }
+
   params.set("en", payload.ga4_event || payload.original_event);
   params.set("_p", String(Date.now()));
   params.set("seg", "1");
@@ -711,6 +823,7 @@ function buildGa4Url(payload, measurementId) {
   params.set("ul", "en-us");
 
   addParam(params, "ep.event_id", payload.event_id);
+  addParam(params, "ep.session_id", payload.session_id);
   addParam(params, "ep.original_event", payload.original_event);
 
   if (payload.currency) {

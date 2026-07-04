@@ -50,6 +50,47 @@ function getNestedObject(payload: any, key: string): Record<string, unknown> | n
   return null;
 }
 
+
+function buildRawTrackingObject(payload: any): Record<string, unknown> | null {
+  const payloadRaw = getNestedObject(payload, "raw") || {};
+  const output: Record<string, unknown> = {};
+
+  const allowedKeys = [
+    "client_id",
+    "clientId",
+    "ga_client_id",
+    "gaClientId",
+    "session_id",
+    "sessionId",
+    "ga_session_id",
+    "gaSessionId",
+    "external_id",
+    "customer_id",
+    "page_location",
+    "page_title",
+    "page_referrer",
+    "currency",
+    "value",
+    "tax",
+    "shipping",
+    "transaction_id",
+    "order_id",
+    "items"
+  ];
+
+  for (const key of allowedKeys) {
+    if (payloadRaw[key] !== undefined && payloadRaw[key] !== null && payloadRaw[key] !== "") {
+      output[key] = payloadRaw[key];
+    }
+
+    if (payload[key] !== undefined && payload[key] !== null && payload[key] !== "") {
+      output[key] = payload[key];
+    }
+  }
+
+  return Object.keys(output).length ? output : null;
+}
+
 function safeEventId(eventName: string, payload: any): string {
   const fromPayload =
     stringOrNull(payload.event_id) ||
@@ -125,7 +166,7 @@ export function normalizeIncomingEvent(payload: any): NormalizedTrackingEvent {
     customer: getNestedObject(payload, "customer"),
     ecommerce: getNestedObject(payload, "ecommerce"),
     consent: getNestedObject(payload, "consent"),
-    raw: null,
+    raw: buildRawTrackingObject(payload),
   };
 }
 

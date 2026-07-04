@@ -1,243 +1,212 @@
-import { useEffect } from "react";
-import { useFetcher } from "react-router";
-import { useAppBridge } from "@shopify/app-bridge-react";
-import { boundary } from "@shopify/shopify-app-react-router/server";
+import { useLoaderData, useLocation } from "react-router";
 import { authenticate } from "../shopify.server";
+import { getOrCreateShopWorkspace } from "../services/workspace.server";
+import { getTestModeSettings } from "../services/test-mode.server";
 
-export const loader = async ({ request }) => {
-  await authenticate.admin(request);
+export async function loader({ request }) {
+  const { session } = await authenticate.admin(request);
+  const workspace = await getOrCreateShopWorkspace(session.shop);
+  const testModeSettings = await getTestModeSettings(workspace.id);
 
-  return null;
-};
+  const url = new URL(request.url);
+  const navParams = new URLSearchParams();
+  const host = url.searchParams.get("host");
+  const embedded = url.searchParams.get("embedded");
+  const locale = url.searchParams.get("locale");
 
-export const action = async ({ request }) => {
-  const { admin } = await authenticate.admin(request);
-  const color = ["Red", "Orange", "Yellow", "Green"][
-    Math.floor(Math.random() * 4)
-  ];
-  const response = await admin.graphql(
-    `#graphql
-      mutation populateProduct($product: ProductCreateInput!) {
-        productCreate(product: $product) {
-          product {
-            id
-            title
-            handle
-            status
-            variants(first: 10) {
-              edges {
-                node {
-                  id
-                  price
-                  barcode
-                  createdAt
-                }
-              }
-            }
-          }
-        }
-      }`,
-    {
-      variables: {
-        product: {
-          title: `${color} Snowboard`,
-        },
-      },
-    },
-  );
-  const responseJson = await response.json();
-  const product = responseJson.data.productCreate.product;
-  const variantId = product.variants.edges[0].node.id;
-  const variantResponse = await admin.graphql(
-    `#graphql
-    mutation shopifyReactRouterTemplateUpdateVariant($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-      productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-        productVariants {
-          id
-          price
-          barcode
-          createdAt
-        }
-      }
-    }`,
-    {
-      variables: {
-        productId: product.id,
-        variants: [{ id: variantId, price: "100.00" }],
-      },
-    },
-  );
-  const variantResponseJson = await variantResponse.json();
+  navParams.set("shop", session.shop);
+  if (host) navParams.set("host", host);
+  if (embedded) navParams.set("embedded", embedded);
+  if (locale) navParams.set("locale", locale);
 
   return {
-    product: responseJson.data.productCreate.product,
-    variant: variantResponseJson.data.productVariantsBulkUpdate.productVariants,
+    testModeSettings,
+    shop: session.shop,
+    navQuery: navParams.toString(),
   };
-};
+}
 
-export default function Index() {
-  const fetcher = useFetcher();
-  const shopify = useAppBridge();
-  const isLoading =
-    ["loading", "submitting"].includes(fetcher.state) &&
-    fetcher.formMethod === "POST";
+export default function HomePage() {
+  const { shop, navQuery, testModeSettings } = useLoaderData();
+  const testModeEnabled = Boolean(testModeSettings?.enabled);
+  const location = useLocation();
+  const withNav = (path) => {
+    const params = new URLSearchParams(location.search);
+    if (!params.get("shop")) params.set("shop", shop);
+    return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
+  };
+  const withShop = (path) => `${path}${path.includes("?") ? "&" : "?"}shop=${encodeURIComponent(shop)}`;
 
-  useEffect(() => {
-    if (fetcher.data?.product?.id) {
-      shopify.toast.show("Product created");
+  const cards = [
+    {
+      title: "Tracking Pixel",
+      icon: "📡",
+      text: "Collects Shopify events including page view, checkout started, contact info, shipping info, payment info, and purchase."
+    },
+    {
+      title: "Google Ads Server-Side",
+      icon: "🎯",
+      text: "Sends purchase conversions through Google Data Manager API using click ID attribution and ecommerce data."
+    },
+    {
+      title: "GA4 Ecommerce",
+      icon: "📊",
+      text: "Supports ecommerce event delivery with transaction ID, value, currency, and item data."
+    },
+    {
+      title: "Attribution Capture",
+      icon: "🧲",
+      text: "Captures gclid, gbraid, wbraid, msclkid, fbclid, ttclid, and epik for better ad attribution."
+    },
+    {
+      title: "Multi-Platform Ready",
+      icon: "🔗",
+      text: "Built for Google, Meta, TikTok, Pinterest, Microsoft Ads, LinkedIn, and future destination integrations."
+    },
+    {
+      title: "Delivery Logs",
+      icon: "🧾",
+      text: "Shows server-side delivery status, success, failed, skipped events, response payloads, and request IDs."
     }
-  }, [fetcher.data?.product?.id, shopify]);
-  const generateProduct = () => fetcher.submit({}, { method: "POST" });
+  ];
 
   return (
-    <s-page heading="Shopify app template">
-      <s-button slot="primary-action" onClick={generateProduct}>
-        Generate a product
-      </s-button>
-
-      <s-section heading="Congrats on creating a new Shopify app 🎉">
-        <s-paragraph>
-          This embedded app template uses{" "}
-          <s-link
-            href="https://shopify.dev/docs/apps/tools/app-bridge"
-            target="_blank"
+    <main style={{ padding: 24, maxWidth: 1200, margin: "0 auto" }}>
+      <section style={{
+        padding: 28,
+        borderRadius: 20,
+        background: "#eff6ff",
+        border: "1px solid #bfdbfe",
+        marginBottom: 24
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 12 }}>
+<div>
+<h1
+          style={{
+            ...styles.title,
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            fontSize: 28,
+            lineHeight: 1.2,
+            margin: 0,
+          }}
+        >
+          <img
+            src="/assets/logos/dh-logo.png"
+            alt="DH Conversions"
+            style={{
+              height: 36,
+              width: "auto",
+              maxWidth: 96,
+              objectFit: "contain",
+              display: "block",
+              flexShrink: 0,
+            }}
+          />
+          <span>Dashboard</span>
+        </h1>
+        {testModeEnabled && (
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              width: "fit-content",
+              marginTop: 12,
+              borderRadius: 999,
+              padding: "7px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: "#9a3412",
+              background: "#fed7aa",
+              border: "1px solid #fdba74",
+            }}
           >
-            App Bridge
-          </s-link>{" "}
-          interface examples like an{" "}
-          <s-link href="/app/additional">additional page in the app nav</s-link>
-          , as well as an{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            Admin GraphQL
-          </s-link>{" "}
-          mutation demo, to provide a starting point for app development.
-        </s-paragraph>
-      </s-section>
-      <s-section heading="Get started with products">
-        <s-paragraph>
-          Generate a product with GraphQL and get the JSON output for that
-          product. Learn more about the{" "}
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql/latest/mutations/productCreate"
-            target="_blank"
-          >
-            productCreate
-          </s-link>{" "}
-          mutation in our API references.
-        </s-paragraph>
-        <s-stack direction="inline" gap="base">
-          <s-button
-            onClick={generateProduct}
-            {...(isLoading ? { loading: true } : {})}
-          >
-            Generate a product
-          </s-button>
-          {fetcher.data?.product && (
-            <s-button
-              onClick={() => {
-                shopify.intents.invoke?.("edit:shopify/Product", {
-                  value: fetcher.data?.product?.id,
-                });
-              }}
-              target="_blank"
-              variant="tertiary"
-            >
-              Edit product
-            </s-button>
-          )}
-        </s-stack>
-        {fetcher.data?.product && (
-          <s-section heading="productCreate mutation">
-            <s-stack direction="block" gap="base">
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.product, null, 2)}</code>
-                </pre>
-              </s-box>
-
-              <s-heading>productVariantsBulkUpdate mutation</s-heading>
-              <s-box
-                padding="base"
-                borderWidth="base"
-                borderRadius="base"
-                background="subdued"
-              >
-                <pre style={{ margin: 0 }}>
-                  <code>{JSON.stringify(fetcher.data.variant, null, 2)}</code>
-                </pre>
-              </s-box>
-            </s-stack>
-          </s-section>
+            TEST MODE ACTIVE
+          </div>
         )}
-      </s-section>
+          </div>
+        </div>
 
-      <s-section slot="aside" heading="App template specs">
-        <s-paragraph>
-          <s-text>Framework: </s-text>
-          <s-link href="https://reactrouter.com/" target="_blank">
-            React Router
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Interface: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/app-home/using-polaris-components"
-            target="_blank"
-          >
-            Polaris web components
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>API: </s-text>
-          <s-link
-            href="https://shopify.dev/docs/api/admin-graphql"
-            target="_blank"
-          >
-            GraphQL
-          </s-link>
-        </s-paragraph>
-        <s-paragraph>
-          <s-text>Database: </s-text>
-          <s-link href="https://www.prisma.io/" target="_blank">
-            Prisma
-          </s-link>
-        </s-paragraph>
-      </s-section>
+        <p style={{ color: "#4b5563", lineHeight: 1.6, maxWidth: 850 }}>
+          Manage Shopify conversion tracking, platform connections, server-side purchase delivery,
+          attribution, catalog readiness, and event monitoring from one place.
+        </p>
 
-      <s-section slot="aside" heading="Next steps">
-        <s-unordered-list>
-          <s-list-item>
-            Build an{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/getting-started/build-app-example"
-              target="_blank"
-            >
-              example app
-            </s-link>
-          </s-list-item>
-          <s-list-item>
-            Explore Shopify&apos;s API with{" "}
-            <s-link
-              href="https://shopify.dev/docs/apps/tools/graphiql-admin-api"
-              target="_blank"
-            >
-              GraphiQL
-            </s-link>
-          </s-list-item>
-        </s-unordered-list>
-      </s-section>
-    </s-page>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 20 }}>
+          <a href={withNav("/app/settings")} style={styles.primaryButton}>Open Configuration</a>
+          <a href={withNav("/app/connections")} style={styles.darkButton}>Platform Connections</a>
+          <a href={withNav("/app/delivery-logs")} style={styles.secondaryButton}>Event Delivery Logs</a>
+          <a href={withNav("/app/help")} style={styles.secondaryButton}>Help / Documentation</a>
+        </div>
+      </section>
+
+      <section style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+        gap: 16,
+        marginBottom: 24
+      }}>
+        {cards.map((card) => (
+          <div key={card.title} style={{
+            border: "1px solid #e5e7eb",
+            borderRadius: 12,
+            padding: 18,
+            background: "white"
+          }}>
+            <div style={{ fontSize: 30, marginBottom: 10 }}>{card.icon}</div>
+            <h3 style={{ margin: "0 0 8px" }}>{card.title}</h3>
+            <p style={{ margin: 0, color: "#4b5563", lineHeight: 1.55 }}>{card.text}</p>
+          </div>
+        ))}
+      </section>
+
+      <section style={{
+        padding: 18,
+        borderRadius: 12,
+        background: "#fff7ed",
+        border: "1px solid #fed7aa"
+      }}>
+        <h3 style={{ marginTop: 0, color: "#c2410c" }}>Protected Customer Data Notice</h3>
+        <p style={{ margin: 0, color: "#9a3412", lineHeight: 1.6 }}>
+          Google Data Manager purchase sending works with click ID attribution and ecommerce data.
+          Customer enrichment from Shopify order data will stay disabled until Shopify approves
+          Protected Customer Data access for this app.
+        </p>
+      </section>
+    </main>
   );
 }
 
-export const headers = (headersArgs) => {
-  return boundary.headers(headersArgs);
+const styles = {
+  primaryButton: {
+    display: "inline-block",
+    padding: "10px 16px",
+    background: "#2563eb",
+    color: "white",
+    textDecoration: "none",
+    borderRadius: 8,
+    fontWeight: 700
+  },
+  darkButton: {
+    display: "inline-block",
+    padding: "10px 16px",
+    background: "#111827",
+    color: "white",
+    textDecoration: "none",
+    borderRadius: 8,
+    fontWeight: 700
+  },
+  secondaryButton: {
+    display: "inline-block",
+    padding: "10px 16px",
+    background: "white",
+    color: "#111827",
+    border: "1px solid #d1d5db",
+    textDecoration: "none",
+    borderRadius: 8,
+    fontWeight: 700
+  }
 };
