@@ -152,7 +152,7 @@ async function sendToServer(payload) {
   try {
     const body = JSON.stringify(payload);
     const appProxyUrls = getAppProxyTrackUrls(payload);
-    const endpoints = appProxyUrls.concat(TRACK_URL).filter(Boolean);
+    const endpoints = appProxyUrls.filter(Boolean);
     let lastError = null;
 
     for (const endpoint of endpoints) {
