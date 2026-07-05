@@ -10,7 +10,7 @@ const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
 const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
 const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
 const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-const DH_PIXEL_VERSION = "2026-07-05-app-proxy-only-v4";
+const DH_PIXEL_VERSION = "2026-07-05-app-proxy-fallback-v5";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
@@ -148,7 +148,7 @@ async function sendToServer(payload) {
   try {
     const body = JSON.stringify(payload);
     const appProxyUrls = getAppProxyTrackUrls(payload);
-    const endpoints = appProxyUrls.filter(Boolean);
+    const endpoints = appProxyUrls.concat(TRACK_URL).filter(Boolean);
     let lastError = null;
 
     for (const endpoint of endpoints) {
