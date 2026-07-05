@@ -1,6 +1,7 @@
 import { register } from "@shopify/web-pixels-extension";
 
 const CONFIG_URL = "https://tracking.datahatches.com/api/pixel-config";
+const APP_PROXY_TRACK_URL = "/apps/dh-track";
 const TRACK_URL = "https://tracking.datahatches.com/api/events/track";
 const GA4_COLLECT_URL = "https://www.google-analytics.com/g/collect";
 const GOOGLE_ADS_CONVERSION_URL = "https://www.googleadservices.com/pagead/conversion";
@@ -9,6 +10,7 @@ const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
 const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
 const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
 const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
+const DH_PIXEL_VERSION = "2026-07-05-app-proxy-remarketing-v3";
 
 let cachedConfig = null;
 
@@ -127,14 +129,50 @@ async function getGaIdentity(browser, event) {
 }
 
 
-function sendToServer(payload) {
+function getAppProxyTrackUrl(payload) {
   try {
-    fetch(TRACK_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      keepalive: true,
-      body: JSON.stringify(payload),
-    });
+    const pageLocation = payload && payload.page_location ? String(payload.page_location) : "";
+    if (pageLocation) {
+      const origin = new URL(pageLocation).origin;
+      return `${origin}${APP_PROXY_TRACK_URL}`;
+    }
+  } catch (e) {
+    // Fall back to relative app proxy path.
+  }
+
+  return APP_PROXY_TRACK_URL;
+}
+
+async function sendToServer(payload) {
+  try {
+    const body = JSON.stringify(payload);
+    const appProxyUrl = getAppProxyTrackUrl(payload);
+    const endpoints = [appProxyUrl, TRACK_URL].filter(Boolean);
+    let lastError = null;
+
+    for (const endpoint of endpoints) {
+      try {
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          keepalive: true,
+          body,
+        });
+
+        if (response.ok || response.type === "opaque") {
+          console.log("[DH Tracking Pixel] server sent", endpoint);
+          return;
+        }
+
+        lastError = new Error(`HTTP ${response.status} from ${endpoint}`);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    if (lastError) {
+      console.log("[DH Tracking Pixel] server send error", lastError);
+    }
   } catch (e) {
     console.log("[DH Tracking Pixel] server send error", e);
   }
@@ -763,8 +801,16 @@ async function buildPayload(event, config, browser) {
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
   const gaIdentity = await getGaIdentity(browser, event);
 
+  console.log("[DH Tracking Pixel] GA identity", {
+    pixelVersion: DH_PIXEL_VERSION,
+    clientId: gaIdentity.clientId,
+    sessionId: gaIdentity.sessionId,
+    shopifyClientId: gaIdentity.shopifyClientId,
+  });
+
   return {
     event_id: event.id,
+    pixel_version: DH_PIXEL_VERSION,
     shop: getShop(event),
     original_event: event.name,
     event_name: mapped.ga4,
@@ -792,6 +838,7 @@ async function buildPayload(event, config, browser) {
       client_id: gaIdentity.clientId,
       session_id: gaIdentity.sessionId,
       shopify_client_id: gaIdentity.shopifyClientId,
+      pixel_version: DH_PIXEL_VERSION,
     },
   };
 }
@@ -897,6 +944,176 @@ function buildGoogleAdsUrl(payload, conversion) {
   return `${GOOGLE_ADS_CONVERSION_URL}/${encodeURIComponent(conversionId)}/?${params.toString()}`;
 }
 
+
+function normalizeRemarketingEventName(payload) {
+  return String(payload.ga4_event || payload.original_event || "").trim();
+}
+
+function getRemarketingPageType(eventName) {
+  const map = {
+    page_view: "home",
+    view_item: "product",
+    view_item_list: "category",
+    search: "searchresults",
+    add_to_cart: "cart",
+    begin_checkout: "cart",
+    purchase: "purchase",
+  };
+
+  return map[eventName] || "other";
+}
+
+function getFirstItem(payload) {
+  if (Array.isArray(payload.items) && payload.items.length) {
+    return payload.items[0] || {};
+  }
+
+  return {};
+}
+
+function buildRemarketingProductId(item, itemIdFormat) {
+  const productId =
+    item.product_id ||
+    item.item_group_id ||
+    item.id ||
+    item.item_id ||
+    "";
+
+  const variantId =
+    item.variant_id ||
+    item.variantId ||
+    item.sku ||
+    "";
+
+  if (itemIdFormat === "product_id") {
+    return String(productId || item.item_id || "").trim();
+  }
+
+  if (itemIdFormat === "variant_id") {
+    return String(variantId || item.item_id || "").trim();
+  }
+
+  if (itemIdFormat === "sku") {
+    return String(item.sku || variantId || item.item_id || "").trim();
+  }
+
+  if (itemIdFormat === "product_variant") {
+    if (productId && variantId) return `${productId}_${variantId}`;
+    return String(item.item_id || productId || variantId || "").trim();
+  }
+
+  if (itemIdFormat === "shopify_country_product_variant") {
+    const country = String(payloadCountryFallback(item) || "US").toUpperCase();
+    if (productId && variantId) return `shopify_${country}_${productId}_${variantId}`;
+    return String(item.item_id || productId || variantId || "").trim();
+  }
+
+  return String(item.item_id || productId || variantId || "").trim();
+}
+
+function payloadCountryFallback(item) {
+  return (
+    item.country ||
+    item.item_country ||
+    item.currency_country ||
+    "US"
+  );
+}
+
+function buildGoogleAdsRemarketingUrl(payload, remarketingConfig) {
+  const conversionId = String(
+    remarketingConfig.conversionId ||
+    remarketingConfig.googleAdsCustomerId ||
+    ""
+  ).replace(/^AW-/, "");
+
+  const eventName = normalizeRemarketingEventName(payload);
+  const item = getFirstItem(payload);
+  const itemIdFormat = remarketingConfig.itemIdFormat || "shopify_country_product_variant";
+  const productId = buildRemarketingProductId(item, itemIdFormat);
+  const pageType = getRemarketingPageType(eventName);
+
+  const params = new URLSearchParams();
+
+  params.set("guid", "ON");
+  params.set("script", "0");
+  params.set("random", String(Date.now()));
+  params.set("url", payload.page_location || "");
+  params.set("ref", payload.page_referrer || "");
+
+  if (payload.value !== undefined && payload.value !== null) {
+    params.set("value", String(payload.value));
+  }
+
+  if (payload.currency) {
+    params.set("currency_code", String(payload.currency));
+  }
+
+  const customParams = [];
+
+  customParams.push(`event=${encodeURIComponent(eventName)}`);
+  customParams.push(`ecomm_pagetype=${encodeURIComponent(pageType)}`);
+
+  if (productId) {
+    customParams.push(`ecomm_prodid=${encodeURIComponent(productId)}`);
+  }
+
+  if (payload.value !== undefined && payload.value !== null) {
+    customParams.push(`ecomm_totalvalue=${encodeURIComponent(String(payload.value))}`);
+  }
+
+  if (payload.transaction_id) {
+    customParams.push(`transaction_id=${encodeURIComponent(String(payload.transaction_id))}`);
+  }
+
+  params.set("data", customParams.join(";"));
+
+  return `https://googleads.g.doubleclick.net/pagead/viewthroughconversion/${encodeURIComponent(conversionId)}/?${params.toString()}`;
+}
+
+function sendGoogleAdsRemarketing(payload, config) {
+  try {
+    const remarketingConfig = config?.googleAds?.remarketing;
+
+    if (!remarketingConfig?.enabled) {
+      return;
+    }
+
+    if (remarketingConfig.deliveryMode && remarketingConfig.deliveryMode !== "client") {
+      console.log("[DH Tracking Pixel] Google Ads remarketing skipped - not client mode", remarketingConfig.deliveryMode);
+      return;
+    }
+
+    const eventName = normalizeRemarketingEventName(payload);
+    const allowedEvents = Array.isArray(remarketingConfig.events)
+      ? remarketingConfig.events
+      : [];
+
+    if (allowedEvents.length && allowedEvents.indexOf(eventName) === -1) {
+      console.log("[DH Tracking Pixel] Google Ads remarketing skipped - event not selected", eventName);
+      return;
+    }
+
+    if (!remarketingConfig.conversionId && !remarketingConfig.googleAdsCustomerId) {
+      console.log("[DH Tracking Pixel] Google Ads remarketing skipped - missing conversion ID");
+      return;
+    }
+
+    const url = buildGoogleAdsRemarketingUrl(payload, remarketingConfig);
+
+    fetch(url, {
+      method: "GET",
+      mode: "no-cors",
+      keepalive: true,
+    });
+
+    console.log("[DH Tracking Pixel] Google Ads remarketing sent", eventName, remarketingConfig.conversionId || remarketingConfig.googleAdsCustomerId);
+  } catch (e) {
+    console.log("[DH Tracking Pixel] Google Ads remarketing error", e);
+  }
+}
+
+
 function sendToGoogleAds(payload, config) {
   try {
     const googleAdsConfig = config?.googleAds;
@@ -907,9 +1124,18 @@ function sendToGoogleAds(payload, config) {
     }
 
     const eventName = mapGoogleAdsEventName(payload);
-    const conversion = googleAdsConfig.conversions?.[eventName];
+    const configured = googleAdsConfig.conversions?.[eventName];
+    const conversions = Array.isArray(configured)
+      ? configured
+      : configured
+        ? [configured]
+        : [];
 
-    if (!conversion?.conversionId || !conversion?.conversionLabel) {
+    const validConversions = conversions.filter(
+      (conversion) => conversion?.conversionId && conversion?.conversionLabel
+    );
+
+    if (!validConversions.length) {
       console.log("[DH Tracking Pixel] Google Ads skipped - missing conversion", {
         eventName,
         available: Object.keys(googleAdsConfig.conversions || {}),
@@ -918,7 +1144,84 @@ function sendToGoogleAds(payload, config) {
       return;
     }
 
-    const url = buildGoogleAdsUrl(payload, conversion);
+    validConversions.forEach((conversion) => {
+      const url = buildGoogleAdsUrl(payload, conversion);
+
+      fetch(url, {
+        method: "GET",
+        mode: "no-cors",
+        keepalive: true,
+      });
+
+      console.log(
+        "[DH Tracking Pixel] Google Ads sent",
+        eventName,
+        conversion.conversionName || "",
+        conversion.conversionId,
+        conversion.conversionLabel
+      );
+    });
+  } catch (e) {
+    console.log("[DH Tracking Pixel] Google Ads send error", e);
+  }
+}
+
+
+function buildGa4ClientSeedUrl(payload, measurementId) {
+  var params = new URLSearchParams();
+
+  params.set("v", "2");
+  params.set("tid", measurementId);
+  params.set("cid", payload.client_id || "dh_client");
+
+  if (payload.session_id) {
+    params.set("sid", String(payload.session_id));
+  }
+
+  params.set("en", "dh_ga4_debug_seed");
+  params.set("_p", String(Date.now()));
+  params.set("_dbg", "1");
+  params.set("seg", "1");
+  params.set("dl", payload.page_location || "");
+  params.set("dt", payload.page_title || "");
+  params.set("dr", payload.page_referrer || "");
+  params.set("sr", "1920x1080");
+  params.set("ul", "en-us");
+
+  addParam(params, "ep.debug_mode", "true");
+  addParam(params, "ep.engagement_time_msec", "1");
+  addParam(params, "ep.event_id", String(payload.event_id || "seed") + "_ga4_seed");
+  addParam(params, "ep.session_id", payload.session_id);
+  addParam(params, "ep.source_event_name", payload.ga4_event || payload.original_event);
+
+  return GA4_COLLECT_URL + "?" + params.toString();
+}
+
+function sendGa4ClientSeed(payload, config) {
+  try {
+    var measurementId =
+      (config && config.ga4 && config.ga4.measurementId) ||
+      (config && config.pixels && config.pixels.ga4Id) ||
+      null;
+
+    var shouldSeed =
+      Boolean(measurementId) &&
+      config &&
+      config.ga4 &&
+      config.ga4.deliveryMode === "server" &&
+      config.ga4.testMode === true;
+
+    if (!shouldSeed) {
+      console.log("[DH Tracking Pixel] GA4 client seed skipped", {
+        pixelVersion: DH_PIXEL_VERSION,
+        measurementId: measurementId,
+        deliveryMode: config && config.ga4 ? config.ga4.deliveryMode : null,
+        testMode: config && config.ga4 ? config.ga4.testMode : null,
+      });
+      return;
+    }
+
+    var url = buildGa4ClientSeedUrl(payload, measurementId);
 
     fetch(url, {
       method: "GET",
@@ -926,9 +1229,9 @@ function sendToGoogleAds(payload, config) {
       keepalive: true,
     });
 
-    console.log("[DH Tracking Pixel] Google Ads sent", eventName, conversion.conversionId, conversion.conversionLabel);
+    console.log("[DH Tracking Pixel] GA4 client seed sent", measurementId, payload.client_id, payload.session_id);
   } catch (e) {
-    console.log("[DH Tracking Pixel] Google Ads send error", e);
+    console.log("[DH Tracking Pixel] GA4 client seed error", e);
   }
 }
 
@@ -968,7 +1271,7 @@ function sendToGa4(payload, config) {
 }
 
 register(({ analytics, browser }) => {
-  console.log("[DH Tracking Pixel] loaded with GA4 client sender");
+  console.log("[DH Tracking Pixel] loaded", DH_PIXEL_VERSION, "with GA4 client sender");
 
   [
     "page_viewed",
@@ -991,10 +1294,17 @@ register(({ analytics, browser }) => {
         const payload = await buildPayload(event, config, browser);
 
         console.log("[DH Tracking Pixel]", eventName, payload);
+        console.log("[DH Tracking Pixel] config snapshot", {
+          pixelVersion: DH_PIXEL_VERSION,
+          ga4: config && config.ga4 ? config.ga4 : null,
+          testMode: config ? config.testMode : null,
+        });
 
         sendToServer(payload);
+        sendGa4ClientSeed(payload, config);
         sendToGa4(payload, config);
         sendToGoogleAds(payload, config);
+        sendGoogleAdsRemarketing(payload, config);
       } catch (e) {
         console.log("[DH Tracking Pixel Error]", eventName, e);
       }

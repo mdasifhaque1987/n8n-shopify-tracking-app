@@ -60,7 +60,7 @@ The JSON file contains:
   "type": "service_account",
   "project_id": "your-project-id",
   "private_key_id": "...",
-  "private_key": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n",
+  "private_key": "REPLACE_WITH_FIREBASE_PRIVATE_KEY_ESCAPED\n",
   "client_email": "...@....iam.gserviceaccount.com",
   "client_id": "...",
   ...
@@ -78,12 +78,12 @@ The JSON file contains:
 
 ```bash
 # Database (required for PostgreSQL)
-DATABASE_URL="postgresql://user:password@localhost:5432/dh_tracking?schema=public"
+DATABASE_URL=REPLACE_WITH_PLACEHOLDER
 
 # Firebase Authentication
 FIREBASE_PROJECT_ID="your-project-id"
 FIREBASE_CLIENT_EMAIL="your-service-account@your-project.iam.gserviceaccount.com"
-FIREBASE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour private key here\n-----END PRIVATE KEY-----"
+FIREBASE_PRIVATE_KEY=REPLACE_WITH_PLACEHOLDER
 
 # JWT Secret (generate a random 32+ character string)
 JWT_SECRET="your-super-secure-random-string-min-32-characters"
@@ -110,7 +110,7 @@ sudo apt-get install postgresql  # Ubuntu
 createdb dh_tracking
 
 # Update DATABASE_URL in .env
-DATABASE_URL="postgresql://localhost:5432/dh_tracking?schema=public"
+DATABASE_URL=REPLACE_WITH_PLACEHOLDER
 ```
 
 ### Option B: Cloud PostgreSQL (Recommended for Production)

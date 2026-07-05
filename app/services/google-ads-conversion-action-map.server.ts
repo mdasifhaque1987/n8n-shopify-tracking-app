@@ -1,6 +1,6 @@
 import db from "../db.server";
 
-export async function saveGoogleAdsConversionAction(data: {
+type SaveGoogleAdsConversionActionInput = {
   workspaceId: string;
   googleAdsCustomerId: string;
   eventName: string;
@@ -11,68 +11,57 @@ export async function saveGoogleAdsConversionAction(data: {
   resourceName: string;
   category?: string;
   reused?: boolean;
-  deliveryMode?: "client" | "server";
-}) {
-  return db.googleAdsConversionAction.upsert({
-    where: {
-      workspaceId_googleAdsCustomerId_eventName: {
-        workspaceId: data.workspaceId,
-        googleAdsCustomerId: data.googleAdsCustomerId,
-        eventName: data.eventName,
-      },
-    },
-    update: {
-      conversionName: data.conversionName,
-      conversionActionId: data.conversionActionId,
-      conversionId: data.conversionId,
-      conversionLabel: data.conversionLabel,
-      resourceName: data.resourceName,
-      category: data.category,
-      reused: Boolean(data.reused),
-      deliveryMode: data.deliveryMode || "server",
-      isActive: true,
-    },
-    create: {
-      workspaceId: data.workspaceId,
-      googleAdsCustomerId: data.googleAdsCustomerId,
-      eventName: data.eventName,
-      conversionName: data.conversionName,
-      conversionActionId: data.conversionActionId,
-      conversionId: data.conversionId,
-      conversionLabel: data.conversionLabel,
-      resourceName: data.resourceName,
-      category: data.category,
-      reused: Boolean(data.reused),
-      deliveryMode: data.deliveryMode || "server",
-      isActive: true,
-    },
-  });
-}
+  deliveryMode?: string;
+  isPrimary?: boolean;
+  existingRecordId?: string;
+};
 
-export async function getGoogleAdsConversionActions(workspaceId: string) {
-  return db.googleAdsConversionAction.findMany({
-    where: {
-      workspaceId,
-      isActive: true,
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
-}
+export async function saveGoogleAdsConversionAction(data: SaveGoogleAdsConversionActionInput) {
+  const payload = {
+    workspaceId: data.workspaceId,
+    googleAdsCustomerId: String(data.googleAdsCustomerId || "").replace(/-/g, "").trim(),
+    eventName: data.eventName,
+    conversionName: data.conversionName,
+    conversionActionId: data.conversionActionId,
+    conversionId: data.conversionId,
+    conversionLabel: data.conversionLabel,
+    resourceName: data.resourceName,
+    category: data.category,
+    reused: Boolean(data.reused),
+    deliveryMode: data.deliveryMode || "client",
+    isPrimary: data.isPrimary !== false,
+    isActive: true,
+  };
 
-export async function getGoogleAdsConversionActionForEvent(data: {
-  workspaceId: string;
-  googleAdsCustomerId: string;
-  eventName: string;
-}) {
-  return db.googleAdsConversionAction.findUnique({
-    where: {
-      workspaceId_googleAdsCustomerId_eventName: {
-        workspaceId: data.workspaceId,
-        googleAdsCustomerId: data.googleAdsCustomerId,
-        eventName: data.eventName,
+  if (data.existingRecordId) {
+    return db.googleAdsConversionAction.update({
+      where: {
+        id: data.existingRecordId,
       },
-    },
+      data: payload,
+    });
+  }
+
+  const existingByConversionActionId = payload.conversionActionId
+    ? await db.googleAdsConversionAction.findFirst({
+        where: {
+          workspaceId: payload.workspaceId,
+          googleAdsCustomerId: payload.googleAdsCustomerId,
+          conversionActionId: payload.conversionActionId,
+        },
+      })
+    : null;
+
+  if (existingByConversionActionId) {
+    return db.googleAdsConversionAction.update({
+      where: {
+        id: existingByConversionActionId.id,
+      },
+      data: payload,
+    });
+  }
+
+  return db.googleAdsConversionAction.create({
+    data: payload,
   });
 }

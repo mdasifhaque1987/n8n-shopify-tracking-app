@@ -41,9 +41,24 @@ function getDataManagerValidateOnly() {
   return process.env.GOOGLE_ADS_DATA_MANAGER_VALIDATE_ONLY === "true";
 }
 
+type PurchaseConversionActionRecord = {
+  id?: string;
+  googleAdsCustomerId: string;
+  eventName: string;
+  conversionName: string;
+  conversionActionId?: string | null;
+  conversionId?: string | null;
+  conversionLabel?: string | null;
+  resourceName: string;
+  category?: string | null;
+  deliveryMode?: string | null;
+  isPrimary?: boolean;
+};
+
 type GoogleAdsDispatchOptions = {
   validateOnly?: boolean;
   testMode?: boolean;
+  conversionActionOverride?: PurchaseConversionActionRecord;
 };
 
 function stringValue(value: unknown) {
@@ -148,7 +163,10 @@ function getConversionActionId(conversionAction: {
   return match?.[1] || "";
 }
 
-async function findPurchaseConversionAction(workspaceId: string) {
+async function findPurchaseConversionAction(
+  workspaceId: string,
+  conversionActionOverride?: PurchaseConversionActionRecord
+) {
   const activeConfig = await db.googleConversionConfig.findFirst({
     where: {
       workspaceId,
@@ -166,11 +184,24 @@ async function findPurchaseConversionAction(workspaceId: string) {
     activeConfig?.googleAdsCustomerId
   );
 
+  if (conversionActionOverride) {
+    const googleAdsCustomerId = cleanCustomerId(
+      conversionActionOverride.googleAdsCustomerId || activeConfig?.googleAdsCustomerId
+    );
+
+    return {
+      activeConfig,
+      conversionAction: conversionActionOverride,
+      googleAdsCustomerId,
+    };
+  }
+
   const conversionAction = await db.googleAdsConversionAction.findFirst({
     where: {
       workspaceId,
       eventName: "PURCHASE",
       isActive: true,
+      deliveryMode: "server",
       ...(preferredGoogleAdsCustomerId
         ? { googleAdsCustomerId: preferredGoogleAdsCustomerId }
         : {}),
@@ -196,6 +227,45 @@ async function findPurchaseConversionAction(workspaceId: string) {
     activeConfig,
     conversionAction,
     googleAdsCustomerId,
+  };
+}
+
+async function findPurchaseConversionActions(workspaceId: string) {
+  const activeConfig = await db.googleConversionConfig.findFirst({
+    where: {
+      workspaceId,
+      isActive: true,
+      events: {
+        has: "PURCHASE",
+      },
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+  });
+
+  const preferredGoogleAdsCustomerId = cleanCustomerId(
+    activeConfig?.googleAdsCustomerId
+  );
+
+  const conversionActions = await db.googleAdsConversionAction.findMany({
+    where: {
+      workspaceId,
+      eventName: "PURCHASE",
+      isActive: true,
+      deliveryMode: "server",
+      ...(preferredGoogleAdsCustomerId
+        ? { googleAdsCustomerId: preferredGoogleAdsCustomerId }
+        : {}),
+    },
+    orderBy: {
+      updatedAt: "desc",
+    },
+  });
+
+  return {
+    activeConfig,
+    conversionActions,
   };
 }
 
@@ -255,7 +325,7 @@ async function dispatchPurchaseToGoogleAdsDataManager(
     }
 
     const { conversionAction, googleAdsCustomerId } =
-      await findPurchaseConversionAction(workspaceId);
+      await findPurchaseConversionAction(workspaceId, options.conversionActionOverride);
 
     if (!conversionAction) {
       return {
@@ -427,7 +497,7 @@ async function dispatchPurchaseToGoogleAdsApi(
     }
 
     const { conversionAction, googleAdsCustomerId } =
-      await findPurchaseConversionAction(workspaceId);
+      await findPurchaseConversionAction(workspaceId, options.conversionActionOverride);
 
     if (!conversionAction) {
       return {
@@ -556,12 +626,73 @@ export async function dispatchPurchaseToGoogleAds(
   }
 
   const apiMode = getServerApiMode();
+  const { conversionActions } = await findPurchaseConversionActions(workspaceId);
 
-  if (apiMode === "google_ads_api") {
-    return dispatchPurchaseToGoogleAdsApi(event, workspaceId, options);
+  if (!conversionActions.length) {
+    return {
+      success: false,
+      status: "skipped",
+      message:
+        "Skipped Google Ads server-side purchase because no active server-side PURCHASE conversion actions were found.",
+    };
   }
 
-  return dispatchPurchaseToGoogleAdsDataManager(event, workspaceId, options);
+  const dispatchOne =
+    apiMode === "google_ads_api"
+      ? dispatchPurchaseToGoogleAdsApi
+      : dispatchPurchaseToGoogleAdsDataManager;
+
+  if (conversionActions.length === 1) {
+    return dispatchOne(event, workspaceId, {
+      ...options,
+      conversionActionOverride: conversionActions[0],
+    });
+  }
+
+  const results = [];
+
+  for (const conversionAction of conversionActions) {
+    const result = await dispatchOne(event, workspaceId, {
+      ...options,
+      conversionActionOverride: conversionAction,
+    });
+
+    results.push({
+      conversionName: conversionAction.conversionName,
+      conversionActionId:
+        conversionAction.conversionActionId ||
+        getConversionActionId(conversionAction),
+      googleAdsCustomerId: conversionAction.googleAdsCustomerId,
+      eventName: conversionAction.eventName,
+      isPrimary: conversionAction.isPrimary,
+      deliveryMode: conversionAction.deliveryMode,
+      success: result.success,
+      status: result.status,
+      message: result.message,
+      responsePayload: result.responsePayload,
+    });
+  }
+
+  const successCount = results.filter((item) => item.success).length;
+  const failedCount = results.filter((item) => item.status === "failed").length;
+  const skippedCount = results.filter((item) => item.status === "skipped").length;
+
+  return {
+    success: successCount > 0,
+    status: successCount > 0 ? "success" : failedCount > 0 ? "failed" : "skipped",
+    message:
+      successCount > 0
+        ? `Google Ads server-side purchase processed for ${successCount}/${results.length} conversion action(s).`
+        : `Google Ads server-side purchase did not send. Failed: ${failedCount}, skipped: ${skippedCount}.`,
+    responsePayload: {
+      apiMode,
+      conversionCount: results.length,
+      successCount,
+      failedCount,
+      skippedCount,
+      results,
+    },
+  };
 }
 
 export async function dispatchToGoogleAds(

@@ -152,14 +152,16 @@ model GoogleAdsConversionAction {
   category            String?
   reused              Boolean @default(false)
   deliveryMode        String  @default("server")
+  isPrimary           Boolean @default(true)
   isActive            Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([workspaceId, googleAdsCustomerId, eventName])
   @@index([workspaceId])
   @@index([googleAdsCustomerId])
+  @@index([workspaceId, googleAdsCustomerId, eventName])
+  @@index([workspaceId, googleAdsCustomerId, conversionActionId])
 }
 
 model GoogleConversionConfig {

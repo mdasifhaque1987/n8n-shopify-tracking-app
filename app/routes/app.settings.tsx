@@ -185,6 +185,7 @@ id: true,
           conversionLabel: true,
           conversionActionId: true,
           deliveryMode: true,
+          isPrimary: true,
           isActive: true,
         },
         orderBy: {
@@ -317,11 +318,16 @@ export async function action({ request }: ActionFunctionArgs) {
   if (actionType === "save_google_conversions") {
     const googleAdsCustomerId = String(formData.get("googleAdsCustomerId") || "");
     const setupType = String(formData.get("setupType") || "default");
-    const conversionName = String(formData.get("conversionName") || "");
+    const conversionName = String(formData.get("conversionName") || "").trim();
+    const conversionActionRecordId = String(formData.get("conversionActionRecordId") || "").trim();
+    const isPrimary = String(formData.get("isPrimary") || "true") === "true";
     const conversionValueMode = String(formData.get("conversionValueMode") || "dynamic");
     const rawDeliveryMode = String(formData.get("deliveryMode") || "client");
     const deliveryMode = rawDeliveryMode === "server" ? "server" : "client";
-    const events = formData.getAll("events").map((event) => String(event));
+    const singleEventName = String(formData.get("eventName") || "").trim();
+    const events = singleEventName
+      ? [singleEventName]
+      : formData.getAll("events").map((event) => String(event));
 
     if (!googleAdsCustomerId) {
       return Response.json(
@@ -332,7 +338,14 @@ export async function action({ request }: ActionFunctionArgs) {
 
     if (!events.length) {
       return Response.json(
-        { ok: false, error: "Please select at least one conversion event." },
+        { ok: false, error: "Please select a conversion event." },
+        { status: 400 }
+      );
+    }
+
+    if (!conversionName) {
+      return Response.json(
+        { ok: false, error: "Please enter a conversion name." },
         { status: 400 }
       );
     }
@@ -369,8 +382,9 @@ export async function action({ request }: ActionFunctionArgs) {
           accessToken: googleAccessToken,
           customerId: googleAdsCustomerId,
           eventName,
-          baseName: setupType === "custom" ? conversionName : undefined,
+          baseName: conversionName,
           conversionValueMode,
+          isPrimary,
         });
 
         await saveGoogleAdsConversionAction({
@@ -385,6 +399,8 @@ export async function action({ request }: ActionFunctionArgs) {
           category: eventName,
           reused: Boolean(action.reused),
           deliveryMode,
+          isPrimary,
+          existingRecordId: conversionActionRecordId || undefined,
         });
 
         createdActions.push(action);
@@ -414,7 +430,9 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return Response.json({
       ok: true,
-      message: "Saved and created/reused Google Ads conversion action(s).",
+      message: conversionActionRecordId
+        ? "Google Ads conversion action updated."
+        : "Google Ads conversion action created and saved.",
       actions: createdActions,
     });
   }
@@ -708,6 +726,45 @@ export default function ConfigurationPage() {
     googleAdsConversionActions.length > 0
       ? "Active"
       : "Pending conversion configuration";
+
+  const emptyGoogleConversionForm = {
+    recordId: "",
+    eventName: "",
+    conversionName: "",
+    isPrimary: "true",
+    conversionValueMode: "dynamic",
+    deliveryMode: "client",
+  };
+
+  const [googleConversionForm, setGoogleConversionForm] = useState(emptyGoogleConversionForm);
+
+  function resetGoogleConversionForm() {
+    setGoogleConversionForm(emptyGoogleConversionForm);
+  }
+
+  function updateGoogleConversionForm(field: string, value: string) {
+    setGoogleConversionForm((previous) => ({
+      ...previous,
+      [field]: value,
+    }));
+  }
+
+  function editGoogleConversion(conversion: {
+    id: string;
+    eventName: string;
+    conversionName?: string | null;
+    isPrimary?: boolean | null;
+    deliveryMode?: string | null;
+  }) {
+    setGoogleConversionForm({
+      recordId: conversion.id,
+      eventName: conversion.eventName || "",
+      conversionName: conversion.conversionName || "",
+      isPrimary: conversion.isPrimary === false ? "false" : "true",
+      conversionValueMode: "dynamic",
+      deliveryMode: conversion.deliveryMode === "server" ? "server" : "client",
+    });
+  }
 
   const merchantCountryCodes = "AF AX AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ BM BT BO BQ BA BW BV BR IO BN BG BF BI KH CM CA CV KY CF TD CL CN CX CC CO KM CG CD CK CR CI HR CU CW CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KW KG LA LV LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY PE PH PN PL PT PR QA RE RO RU RW BL SH KN LC MF PM VC WS SM ST SA SN RS SC SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH TW TJ TZ TH TL TG TK TO TT TN TR TM TC TV UG UA AE GB UM US UY UZ VU VE VN VG VI WF EH YE ZM ZW"
     .split(" ")
@@ -1420,7 +1477,10 @@ export default function ConfigurationPage() {
                                 type="button"
                                 style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
                                 disabled={!isEnabled || !selectedValue}
-                                onClick={() => setActiveModal("conversions")}
+                                onClick={() => {
+                                  resetGoogleConversionForm();
+                                  setActiveModal("conversions");
+                                }}
                               >
                                 Conversions
                               </button>
@@ -1755,7 +1815,14 @@ export default function ConfigurationPage() {
             </p>
 
             <div style={styles.modalActions}>
-              <button type="button" style={styles.secondaryButton} onClick={() => setActiveModal(null)}>
+              <button
+                type="button"
+                style={styles.secondaryButton}
+                onClick={() => {
+                  resetGoogleConversionForm();
+                  setActiveModal(null);
+                }}
+              >
                 Cancel
               </button>
               <button
@@ -1776,6 +1843,8 @@ export default function ConfigurationPage() {
         <Modal title="Google Ads Conversion Configuration" onClose={() => setActiveModal(null)}>
           <conversionFetcher.Form method="post" style={styles.modalGrid}>
             <input type="hidden" name="_action" value="save_google_conversions" />
+            <input type="hidden" name="setupType" value="custom" />
+            <input type="hidden" name="conversionActionRecordId" value={googleConversionForm.recordId} />
 
             <label style={styles.label}>
               Selected Google Ads Account
@@ -1788,66 +1857,64 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Conversion Setup Type
-              <select style={styles.select} name="setupType" defaultValue="default">
-                <option value="default">Use default recommended conversions</option>
-                <option value="custom">Create custom conversions</option>
-                <option value="existing">Select existing conversions</option>
+              Conversion Event
+              <select
+                style={styles.select}
+                name="eventName"
+                value={googleConversionForm.eventName}
+                onChange={(event) => updateGoogleConversionForm("eventName", event.currentTarget.value)}
+              >
+                <option value="">Select event</option>
+                <option value="PAGE_VIEW">Page View</option>
+                <option value="VIEW_ITEM">View Item</option>
+                <option value="ADD_TO_CART">Add to Cart</option>
+                <option value="BEGIN_CHECKOUT">Begin Checkout</option>
+                <option value="ADD_SHIPPING_INFO">Add Shipping Info</option>
+                <option value="ADD_PAYMENT_INFO">Add Payment Info</option>
+                <option value="PURCHASE">Purchase</option>
+                <option value="LEAD">Lead</option>
+                <option value="SUBSCRIBE">Subscribe</option>
               </select>
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                You can create multiple conversions for the same event by using different conversion names.
+              </small>
             </label>
 
-            <div style={styles.checkGrid}>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="PAGE_VIEW" defaultChecked />
-                Page View
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="VIEW_ITEM" defaultChecked />
-                View Item
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="ADD_TO_CART" defaultChecked />
-                Add to Cart
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="BEGIN_CHECKOUT" defaultChecked />
-                Begin Checkout
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="ADD_SHIPPING_INFO" defaultChecked />
-                Add Shipping Info
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="ADD_PAYMENT_INFO" defaultChecked />
-                Add Payment Info
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="PURCHASE" defaultChecked />
-                Purchase
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="LEAD" />
-                Lead
-              </label>
-              <label style={styles.checkboxLabel}>
-                <input type="checkbox" name="events" value="SUBSCRIBE" />
-                Subscribe
-              </label>
-            </div>
-
             <label style={styles.label}>
-              Custom Conversion Name
+              Conversion Name
               <input
                 style={styles.input}
                 name="conversionName"
-                placeholder="Example: Shopify Purchase - Primary"
-                defaultValue="Shopify Purchase - Primary"
+                placeholder="Example: DH Purchase - Primary"
+                value={googleConversionForm.conversionName}
+                onChange={(event) => updateGoogleConversionForm("conversionName", event.currentTarget.value)}
               />
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                This name will be used in Google Ads. Example: DH Purchase - Primary, DH Purchase - Secondary.
+              </small>
+            </label>
+
+            <label style={styles.label}>
+              Goal Role
+              <select
+                style={styles.select}
+                name="isPrimary"
+                value={googleConversionForm.isPrimary}
+                onChange={(event) => updateGoogleConversionForm("isPrimary", event.currentTarget.value)}
+              >
+                <option value="true">Primary conversion</option>
+                <option value="false">Secondary conversion</option>
+              </select>
             </label>
 
             <label style={styles.label}>
               Conversion Value
-              <select style={styles.select} name="conversionValueMode" defaultValue="dynamic">
+              <select
+                style={styles.select}
+                name="conversionValueMode"
+                value={googleConversionForm.conversionValueMode}
+                onChange={(event) => updateGoogleConversionForm("conversionValueMode", event.currentTarget.value)}
+              >
                 <option value="dynamic">Use dynamic Shopify value</option>
                 <option value="fixed">Use fixed value</option>
                 <option value="none">No value</option>
@@ -1880,11 +1947,22 @@ export default function ConfigurationPage() {
 
             <label style={styles.label}>
               Google Ads Delivery Mode
-              <select style={styles.select} name="deliveryMode" defaultValue="client">
+              <select
+                style={styles.select}
+                name="deliveryMode"
+                value={googleConversionForm.deliveryMode}
+                onChange={(event) => updateGoogleConversionForm("deliveryMode", event.currentTarget.value)}
+              >
                 <option value="client">Client-side only</option>
                 <option value="server">Server-side only</option>
               </select>
             </label>
+
+            {googleConversionForm.recordId && (
+              <div style={styles.notice}>
+                Editing existing conversion mapping. Save will update this app record.
+              </div>
+            )}
 
             {conversionResult?.ok && (
               <div style={styles.successBox}>
@@ -1908,7 +1986,9 @@ export default function ConfigurationPage() {
                 disabled={conversionFetcher.state !== "idle"}
               >
                 {conversionFetcher.state === "idle"
-                  ? "Save Conversion Configuration"
+                  ? googleConversionForm.recordId
+                    ? "Update Conversion"
+                    : "Create Conversion"
                   : "Saving..."}
               </button>
             </div>
@@ -1944,7 +2024,7 @@ export default function ConfigurationPage() {
                     key={conversion.id}
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "1fr 1.3fr 1fr 1.2fr auto",
+                      gridTemplateColumns: "1fr 1.2fr 0.8fr 0.8fr 1.2fr auto auto",
                       gap: "8px",
                       alignItems: "center",
                       padding: "10px",
@@ -1959,6 +2039,11 @@ export default function ConfigurationPage() {
                     </div>
 
                     <div>{conversion.conversionName || "-"}</div>
+
+                    <div>
+                      {conversion.isPrimary ? "Primary" : "Secondary"}
+                    </div>
+
                     <div>{conversion.conversionId || "-"}</div>
 
                     <div
@@ -1967,6 +2052,17 @@ export default function ConfigurationPage() {
                     >
                       {conversion.conversionLabel || "-"}
                     </div>
+
+                    <button
+                      type="button"
+                      style={{
+                        ...styles.secondaryButton,
+                        padding: "8px 10px",
+                      }}
+                      onClick={() => editGoogleConversion(conversion)}
+                    >
+                      Modify
+                    </button>
 
                     <deleteConversionFetcher.Form method="post">
                       <input type="hidden" name="_action" value="delete_google_conversion" />
@@ -1992,7 +2088,7 @@ export default function ConfigurationPage() {
         </Modal>
       )}
 
-      {activeModal === "feed" && (
+            {activeModal === "feed" && (
         <Modal title="Merchant Center Feed Configuration" onClose={() => setActiveModal(null)}>
           <feedFetcher.Form method="post" style={{ maxWidth: "760px", overflowX: "hidden" }}>
             <input type="hidden" name="_action" value="create_merchant_feed" />

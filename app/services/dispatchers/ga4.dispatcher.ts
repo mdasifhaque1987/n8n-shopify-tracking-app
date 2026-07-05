@@ -67,13 +67,49 @@ function cleanObject<T extends Record<string, unknown>>(input: T): Record<string
   return output;
 }
 
+
+function isGaStyleClientId(value?: string) {
+  return Boolean(value && /^\d+\.\d+$/.test(value));
+}
+
+function hashToGaNumber(value: string) {
+  let hash = 2166136261;
+
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  const positive = hash >>> 0;
+
+  return 100000000 + (positive % 1900000000);
+}
+
+function normalizeGaClientId(value: string | undefined, event: NormalizedTrackingEvent) {
+  if (isGaStyleClientId(value)) {
+    return value as string;
+  }
+
+  const source =
+    value ||
+    event.event_id ||
+    String(event.event_time || "") ||
+    `${Date.now()}-${Math.random()}`;
+
+  const left = hashToGaNumber(source);
+  const right = hashToGaNumber(`${source}:dh-ga4-client`);
+
+  return `${left}.${right}`;
+}
+
+
 function getClientId(event: NormalizedTrackingEvent) {
   const raw = objectValue(event.raw);
   const rawRaw = nestedObjectValue(raw, "raw");
   const customer = objectValue(event.customer);
   const attribution = objectValue(event.attribution);
 
-  return (
+  const sourceClientId =
     stringValue(raw.client_id) ||
     stringValue(raw.clientId) ||
     stringValue(raw.ga_client_id) ||
@@ -87,8 +123,9 @@ function getClientId(event: NormalizedTrackingEvent) {
     stringValue(attribution.client_id) ||
     stringValue(attribution.ga_client_id) ||
     event.event_id ||
-    `${Date.now()}.${Math.random().toString(36).slice(2, 12)}`
-  );
+    undefined;
+
+  return normalizeGaClientId(sourceClientId, event);
 }
 
 function getUserId(event: NormalizedTrackingEvent) {

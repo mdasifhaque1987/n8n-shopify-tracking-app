@@ -229,7 +229,8 @@ async function createConversionAction(
   customerId: string,
   conversionName: string,
   eventName: string,
-  conversionValueMode: ConversionValueMode = "dynamic"
+  conversionValueMode: ConversionValueMode = "dynamic",
+  isPrimary = true
 ) {
   const cleanId = cleanCustomerId(customerId);
 
@@ -246,7 +247,7 @@ async function createConversionAction(
               type: "WEBPAGE",
               category: categoryForEvent(eventName),
               status: "ENABLED",
-              primaryForGoal: true,
+              primaryForGoal: isPrimary,
               valueSettings: {
                 defaultValue: eventName === "PURCHASE" ? 1 : 0,
                 alwaysUseDefaultValue: conversionValueMode !== "dynamic",
@@ -296,7 +297,8 @@ export async function createOrReuseGoogleAdsConversionAction(
     input.customerId,
     conversionName,
     input.eventName,
-    input.conversionValueMode
+    input.conversionValueMode,
+    input.isPrimary !== false
   );
 
   const created = await findConversionActionByResourceName(
