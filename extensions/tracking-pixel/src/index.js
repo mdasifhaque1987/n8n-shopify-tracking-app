@@ -11,6 +11,7 @@ const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
 const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
 const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const DH_PIXEL_VERSION = "2026-07-05-app-proxy-remarketing-v3";
+const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
 
@@ -56,7 +57,7 @@ async function storageGet(browser, key) {
       return await browser.localStorage.getItem(key);
     }
   } catch (e) {
-    console.log("[DH Tracking Pixel] storage get error", key, e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] storage get error", key, e);
   }
 
   return null;
@@ -73,7 +74,7 @@ async function storageSet(browser, key, value) {
       return true;
     }
   } catch (e) {
-    console.log("[DH Tracking Pixel] storage set error", key, e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] storage set error", key, e);
   }
 
   return false;
@@ -129,25 +130,29 @@ async function getGaIdentity(browser, event) {
 }
 
 
-function getAppProxyTrackUrl(payload) {
+function getAppProxyTrackUrls(payload) {
+  const urls = [APP_PROXY_TRACK_URL];
+
   try {
     const pageLocation = payload && payload.page_location ? String(payload.page_location) : "";
     if (pageLocation) {
       const origin = new URL(pageLocation).origin;
-      return `${origin}${APP_PROXY_TRACK_URL}`;
+      urls.push(`${origin}${APP_PROXY_TRACK_URL}`);
     }
   } catch (e) {
-    // Fall back to relative app proxy path.
+    // Keep relative app proxy path and direct fallback.
   }
 
-  return APP_PROXY_TRACK_URL;
+  return urls.filter(function (url, index, list) {
+    return url && list.indexOf(url) === index;
+  });
 }
 
 async function sendToServer(payload) {
   try {
     const body = JSON.stringify(payload);
-    const appProxyUrl = getAppProxyTrackUrl(payload);
-    const endpoints = [appProxyUrl, TRACK_URL].filter(Boolean);
+    const appProxyUrls = getAppProxyTrackUrls(payload);
+    const endpoints = appProxyUrls.concat(TRACK_URL).filter(Boolean);
     let lastError = null;
 
     for (const endpoint of endpoints) {
@@ -160,7 +165,7 @@ async function sendToServer(payload) {
         });
 
         if (response.ok || response.type === "opaque") {
-          console.log("[DH Tracking Pixel] server sent", endpoint);
+          DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] server sent", endpoint);
           return;
         }
 
@@ -171,10 +176,10 @@ async function sendToServer(payload) {
     }
 
     if (lastError) {
-      console.log("[DH Tracking Pixel] server send error", lastError);
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] server send error", lastError);
     }
   } catch (e) {
-    console.log("[DH Tracking Pixel] server send error", e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] server send error", e);
   }
 }
 
@@ -801,7 +806,7 @@ async function buildPayload(event, config, browser) {
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
   const gaIdentity = await getGaIdentity(browser, event);
 
-  console.log("[DH Tracking Pixel] GA identity", {
+  DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA identity", {
     pixelVersion: DH_PIXEL_VERSION,
     clientId: gaIdentity.clientId,
     sessionId: gaIdentity.sessionId,
@@ -1080,7 +1085,7 @@ function sendGoogleAdsRemarketing(payload, config) {
     }
 
     if (remarketingConfig.deliveryMode && remarketingConfig.deliveryMode !== "client") {
-      console.log("[DH Tracking Pixel] Google Ads remarketing skipped - not client mode", remarketingConfig.deliveryMode);
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads remarketing skipped - not client mode", remarketingConfig.deliveryMode);
       return;
     }
 
@@ -1090,12 +1095,12 @@ function sendGoogleAdsRemarketing(payload, config) {
       : [];
 
     if (allowedEvents.length && allowedEvents.indexOf(eventName) === -1) {
-      console.log("[DH Tracking Pixel] Google Ads remarketing skipped - event not selected", eventName);
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads remarketing skipped - event not selected", eventName);
       return;
     }
 
     if (!remarketingConfig.conversionId && !remarketingConfig.googleAdsCustomerId) {
-      console.log("[DH Tracking Pixel] Google Ads remarketing skipped - missing conversion ID");
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads remarketing skipped - missing conversion ID");
       return;
     }
 
@@ -1107,9 +1112,9 @@ function sendGoogleAdsRemarketing(payload, config) {
       keepalive: true,
     });
 
-    console.log("[DH Tracking Pixel] Google Ads remarketing sent", eventName, remarketingConfig.conversionId || remarketingConfig.googleAdsCustomerId);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads remarketing sent", eventName, remarketingConfig.conversionId || remarketingConfig.googleAdsCustomerId);
   } catch (e) {
-    console.log("[DH Tracking Pixel] Google Ads remarketing error", e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads remarketing error", e);
   }
 }
 
@@ -1119,7 +1124,7 @@ function sendToGoogleAds(payload, config) {
     const googleAdsConfig = config?.googleAds;
 
     if (!googleAdsConfig?.enabled) {
-      console.log("[DH Tracking Pixel] Google Ads skipped - not enabled", googleAdsConfig);
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads skipped - not enabled", googleAdsConfig);
       return;
     }
 
@@ -1136,7 +1141,7 @@ function sendToGoogleAds(payload, config) {
     );
 
     if (!validConversions.length) {
-      console.log("[DH Tracking Pixel] Google Ads skipped - missing conversion", {
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads skipped - missing conversion", {
         eventName,
         available: Object.keys(googleAdsConfig.conversions || {}),
         missingLabels: googleAdsConfig.missingLabels || [],
@@ -1153,7 +1158,7 @@ function sendToGoogleAds(payload, config) {
         keepalive: true,
       });
 
-      console.log(
+      DH_PIXEL_DEBUG && console.log(
         "[DH Tracking Pixel] Google Ads sent",
         eventName,
         conversion.conversionName || "",
@@ -1162,7 +1167,7 @@ function sendToGoogleAds(payload, config) {
       );
     });
   } catch (e) {
-    console.log("[DH Tracking Pixel] Google Ads send error", e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads send error", e);
   }
 }
 
@@ -1212,7 +1217,7 @@ function sendGa4ClientSeed(payload, config) {
       config.ga4.testMode === true;
 
     if (!shouldSeed) {
-      console.log("[DH Tracking Pixel] GA4 client seed skipped", {
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 client seed skipped", {
         pixelVersion: DH_PIXEL_VERSION,
         measurementId: measurementId,
         deliveryMode: config && config.ga4 ? config.ga4.deliveryMode : null,
@@ -1229,9 +1234,9 @@ function sendGa4ClientSeed(payload, config) {
       keepalive: true,
     });
 
-    console.log("[DH Tracking Pixel] GA4 client seed sent", measurementId, payload.client_id, payload.session_id);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 client seed sent", measurementId, payload.client_id, payload.session_id);
   } catch (e) {
-    console.log("[DH Tracking Pixel] GA4 client seed error", e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 client seed error", e);
   }
 }
 
@@ -1248,7 +1253,7 @@ function sendToGa4(payload, config) {
       (!config?.ga4 || config.ga4.deliveryMode !== "server");
 
     if (!ga4Enabled) {
-      console.log("[DH Tracking Pixel] GA4 skipped", {
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 skipped", {
         measurementId,
         deliveryMode: config?.ga4?.deliveryMode,
         enabled: config?.ga4?.enabled,
@@ -1264,14 +1269,14 @@ function sendToGa4(payload, config) {
       keepalive: true,
     });
 
-    console.log("[DH Tracking Pixel] GA4 sent", payload.ga4_event, measurementId);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 sent", payload.ga4_event, measurementId);
   } catch (e) {
-    console.log("[DH Tracking Pixel] GA4 send error", e);
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 send error", e);
   }
 }
 
 register(({ analytics, browser }) => {
-  console.log("[DH Tracking Pixel] loaded", DH_PIXEL_VERSION, "with GA4 client sender");
+  DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] loaded", DH_PIXEL_VERSION, "with GA4 client sender");
 
   [
     "page_viewed",
@@ -1293,8 +1298,8 @@ register(({ analytics, browser }) => {
         const config = await getConfig(shop);
         const payload = await buildPayload(event, config, browser);
 
-        console.log("[DH Tracking Pixel]", eventName, payload);
-        console.log("[DH Tracking Pixel] config snapshot", {
+        DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel]", eventName, payload);
+        DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] config snapshot", {
           pixelVersion: DH_PIXEL_VERSION,
           ga4: config && config.ga4 ? config.ga4 : null,
           testMode: config ? config.testMode : null,
@@ -1306,7 +1311,7 @@ register(({ analytics, browser }) => {
         sendToGoogleAds(payload, config);
         sendGoogleAdsRemarketing(payload, config);
       } catch (e) {
-        console.log("[DH Tracking Pixel Error]", eventName, e);
+        DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel Error]", eventName, e);
       }
     });
   });
