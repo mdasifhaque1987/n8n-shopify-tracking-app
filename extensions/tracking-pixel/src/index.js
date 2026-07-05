@@ -10,7 +10,7 @@ const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
 const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
 const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
 const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-const DH_PIXEL_VERSION = "2026-07-05-app-proxy-remarketing-v3";
+const DH_PIXEL_VERSION = "2026-07-05-app-proxy-only-v4";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
@@ -131,21 +131,17 @@ async function getGaIdentity(browser, event) {
 
 
 function getAppProxyTrackUrls(payload) {
-  const urls = [APP_PROXY_TRACK_URL];
-
   try {
     const pageLocation = payload && payload.page_location ? String(payload.page_location) : "";
     if (pageLocation) {
       const origin = new URL(pageLocation).origin;
-      urls.push(`${origin}${APP_PROXY_TRACK_URL}`);
+      return [`${origin}${APP_PROXY_TRACK_URL}`];
     }
   } catch (e) {
-    // Keep relative app proxy path and direct fallback.
+    // Fall back to relative path only if page_location is unavailable.
   }
 
-  return urls.filter(function (url, index, list) {
-    return url && list.indexOf(url) === index;
-  });
+  return [APP_PROXY_TRACK_URL];
 }
 
 async function sendToServer(payload) {
