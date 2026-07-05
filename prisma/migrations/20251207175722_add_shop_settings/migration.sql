@@ -1,6 +1,6 @@
 -- CreateTable
-CREATE TABLE "ShopSettings" (
-    "id" INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS "ShopSettings" (
+    "id" SERIAL NOT NULL PRIMARY KEY,
     "shop" TEXT NOT NULL,
     "ga4Id" TEXT,
     "googleAdsId" TEXT,
@@ -9,9 +9,9 @@ CREATE TABLE "ShopSettings" (
     "pinterestTagId" TEXT,
     "linkedinPid" TEXT,
     "bingUetTagId" TEXT,
-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "updatedAt" DATETIME NOT NULL
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP(3) NOT NULL
 );
 
 -- CreateIndex
-CREATE UNIQUE INDEX "ShopSettings_shop_key" ON "ShopSettings"("shop");
+CREATE UNIQUE INDEX IF NOT EXISTS "ShopSettings_shop_key" ON "ShopSettings"("shop");
