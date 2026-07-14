@@ -1,5 +1,8 @@
 import db from "../db.server";
-import { resolveGoogleAccessToken } from "../services/google-token.server";
+import {
+  resolveGoogleAccessToken,
+  withGoogleAccessTokenRetry,
+} from "../services/google-token.server";
 import { useState, type CSSProperties, type ReactNode } from "react";
 import {
   Link,
@@ -132,7 +135,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     if (decryptedGoogleConnection?.decryptedAccessToken) {
       const googleAdsAccounts = await withTimeout(
-        getGoogleAdsAccounts(decryptedGoogleConnection.decryptedAccessToken),
+        withGoogleAccessTokenRetry(
+          googleConnection,
+          (accessToken) => getGoogleAdsAccounts(accessToken)
+        ),
         [],
         12000
       );
@@ -143,7 +149,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
       }));
 
       const merchantCenters = await withTimeout(
-        getMerchantCenters(decryptedGoogleConnection.decryptedAccessToken),
+        withGoogleAccessTokenRetry(
+          googleConnection,
+          (accessToken) => getMerchantCenters(accessToken)
+        ),
         [],
         12000
       );
@@ -155,7 +164,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
       if (shouldLoadGa4Assets) {
         const ga4Properties = await withTimeout(
-          getGoogleAnalyticsProperties(decryptedGoogleConnection.decryptedAccessToken),
+          withGoogleAccessTokenRetry(
+            googleConnection,
+            (accessToken) =>
+              getGoogleAnalyticsProperties(accessToken)
+          ),
           [],
           8000
         );
@@ -167,9 +180,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
         if (savedGa4PropertyId) {
           const ga4DataStreams = await withTimeout(
-            getGoogleAnalyticsDataStreams(
-              decryptedGoogleConnection.decryptedAccessToken,
-              savedGa4PropertyId
+            withGoogleAccessTokenRetry(
+              googleConnection,
+              (accessToken) =>
+                getGoogleAnalyticsDataStreams(
+                  accessToken,
+                  savedGa4PropertyId
+                )
             ),
             [],
             8000

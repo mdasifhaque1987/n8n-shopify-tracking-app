@@ -1,9 +1,15 @@
+import type { PlatformConnection } from "@prisma/client";
 import db from "../db.server";
 
 type EncryptionHelpers = {
   encrypt?: (value: string) => string | Promise<string>;
   decrypt?: (value: string) => string | Promise<string>;
 };
+
+type GoogleTokenConnection = Pick<
+  PlatformConnection,
+  "id" | "accessToken" | "refreshToken" | "tokenExpiresAt"
+>;
 
 async function loadEncryptionHelpers(): Promise<EncryptionHelpers> {
   try {
@@ -101,7 +107,15 @@ function getGoogleOAuthClientSecret() {
   );
 }
 
-function tokenNeedsRefresh(connection: any, accessToken: string | null) {
+function tokenNeedsRefresh(
+  connection: GoogleTokenConnection,
+  accessToken: string | null,
+  forceRefresh = false
+) {
+  if (forceRefresh) {
+    return true;
+  }
+
   if (!accessToken || !looksLikeGoogleAccessToken(accessToken)) {
     return true;
   }
@@ -116,14 +130,23 @@ function tokenNeedsRefresh(connection: any, accessToken: string | null) {
   return expiresAt <= fiveMinutesFromNow;
 }
 
-export async function resolveGoogleAccessToken(connection: any) {
+export async function resolveGoogleAccessToken(
+  connection: GoogleTokenConnection,
+  options: { forceRefresh?: boolean } = {}
+) {
   const accessTokenWasEncrypted = looksEncrypted(connection?.accessToken);
   const refreshTokenWasEncrypted = looksEncrypted(connection?.refreshToken);
 
   let accessToken = await maybeDecrypt(connection?.accessToken);
   const refreshToken = await maybeDecrypt(connection?.refreshToken);
 
-  if (!tokenNeedsRefresh(connection, accessToken)) {
+  if (
+    !tokenNeedsRefresh(
+      connection,
+      accessToken,
+      Boolean(options.forceRefresh)
+    )
+  ) {
     return accessToken as string;
   }
 
@@ -180,4 +203,77 @@ export async function resolveGoogleAccessToken(connection: any) {
   });
 
   return accessToken;
+}
+
+function getGoogleApiStatus(error: unknown): number {
+  if (!error || typeof error !== "object") {
+    return 0;
+  }
+
+  const candidate = error as {
+    status?: number | string;
+    code?: number | string;
+    response?: {
+      status?: number | string;
+    };
+  };
+
+  const rawStatus =
+    candidate.response?.status ??
+    candidate.status ??
+    candidate.code ??
+    0;
+
+  const status = Number(rawStatus);
+
+  return Number.isFinite(status) ? status : 0;
+}
+
+export async function withGoogleAccessTokenRetry<T>(
+  connection: GoogleTokenConnection,
+  operation: (accessToken: string) => Promise<T>
+): Promise<T> {
+  const latestConnection = connection?.id
+    ? await db.platformConnection.findUnique({
+        where: {
+          id: connection.id,
+        },
+      })
+    : connection;
+
+  if (!latestConnection) {
+    throw new Error("Google connection was not found.");
+  }
+
+  let accessToken =
+    await resolveGoogleAccessToken(latestConnection);
+
+  try {
+    return await operation(accessToken);
+  } catch (error) {
+    if (getGoogleApiStatus(error) !== 401) {
+      throw error;
+    }
+
+    console.warn(
+      "[Google Token] Access token was rejected with 401. Refreshing and retrying once."
+    );
+
+    const currentConnection = latestConnection.id
+      ? await db.platformConnection.findUnique({
+          where: {
+            id: latestConnection.id,
+          },
+        })
+      : latestConnection;
+
+    accessToken = await resolveGoogleAccessToken(
+      currentConnection || latestConnection,
+      {
+        forceRefresh: true,
+      }
+    );
+
+    return operation(accessToken);
+  }
 }

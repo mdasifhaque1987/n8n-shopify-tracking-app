@@ -34,6 +34,87 @@ function createOAuth2Client() {
   );
 }
 
+
+function createGoogleApiError(
+  message: string,
+  status: number,
+  details?: unknown
+): Error & { status: number; details?: unknown } {
+  const error = new Error(message) as Error & {
+    status: number;
+    details?: unknown;
+  };
+
+  error.status = status;
+  error.details = details;
+
+  return error;
+}
+
+function getGoogleApiErrorStatus(error: unknown): number {
+  if (!error || typeof error !== "object") {
+    return 0;
+  }
+
+  const candidate = error as {
+    status?: number | string;
+    code?: number | string;
+    response?: {
+      status?: number | string;
+    };
+  };
+
+  const rawStatus =
+    candidate.response?.status ??
+    candidate.status ??
+    candidate.code ??
+    0;
+
+  const status = Number(rawStatus);
+
+  return Number.isFinite(status) ? status : 0;
+}
+
+type GoogleOAuthErrorShape = {
+  response?: {
+    data?: {
+      error_description?: unknown;
+      error?: unknown;
+    };
+  };
+  message?: unknown;
+};
+
+type GoogleAdsAccountsResponse = {
+  resourceNames?: string[];
+  error?: unknown;
+};
+
+type MerchantAccountIdentifier = {
+  merchantId?: string | number;
+  aggregatorId?: string | number;
+  accountId?: string | number;
+};
+
+type MerchantCentersResponse = {
+  accountIdentifiers?: MerchantAccountIdentifier[];
+  error?: unknown;
+};
+
+type Ga4DataStreamApiItem = {
+  type?: string;
+  name?: string;
+  displayName?: string;
+  webStreamData?: {
+    measurementId?: string;
+    defaultUri?: string;
+  };
+};
+
+type Ga4DataStreamsResponse = {
+  dataStreams?: Ga4DataStreamApiItem[];
+};
+
 /**
  * Generate Google OAuth authorization URL
  */
@@ -86,16 +167,20 @@ export async function exchangeGoogleCode(code: string): Promise<{
       expiresAt,
       email: userInfo.data.email || "",
     };
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error("Error exchanging Google code:", error);
 
+    const candidate = error as GoogleOAuthErrorShape;
+
     const details =
-      error?.response?.data?.error_description ||
-      error?.response?.data?.error ||
-      error?.message ||
+      candidate.response?.data?.error_description ??
+      candidate.response?.data?.error ??
+      candidate.message ??
       "Unknown Google token exchange error";
 
-    throw new Error(`Failed to exchange authorization code: ${details}`);
+    throw new Error(
+      `Failed to exchange authorization code: ${String(details)}`
+    );
   }
 }
 
@@ -176,10 +261,20 @@ export async function getGoogleAdsAccounts(
       }
     );
 
-    const data: any = await response.json();
+    const data =
+      (await response.json()) as GoogleAdsAccountsResponse;
 
     if (!response.ok) {
       console.error("Google Ads accounts error:", data);
+
+      if (response.status === 401) {
+        throw createGoogleApiError(
+          "Google Ads access token was rejected.",
+          response.status,
+          data
+        );
+      }
+
       return [];
     }
 
@@ -194,6 +289,10 @@ export async function getGoogleAdsAccounts(
       };
     });
   } catch (error) {
+    if (getGoogleApiErrorStatus(error) === 401) {
+      throw error;
+    }
+
     console.error("Error getting Google Ads accounts:", error);
     return [];
   }
@@ -218,17 +317,27 @@ export async function getMerchantCenters(
       }
     );
 
-    const data: any = await response.json();
+    const data =
+      (await response.json()) as MerchantCentersResponse;
 
     if (!response.ok) {
       console.error("Merchant Center authinfo error:", data);
+
+      if (response.status === 401) {
+        throw createGoogleApiError(
+          "Merchant Center access token was rejected.",
+          response.status,
+          data
+        );
+      }
+
       return [];
     }
 
     const accountIdentifiers = data.accountIdentifiers || [];
 
     return accountIdentifiers
-      .map((account: any) => {
+      .map((account) => {
         const merchantId =
           account.merchantId ||
           account.aggregatorId ||
@@ -242,6 +351,10 @@ export async function getMerchantCenters(
       })
       .filter((account: { merchantId: string }) => account.merchantId);
   } catch (error) {
+    if (getGoogleApiErrorStatus(error) === 401) {
+      throw error;
+    }
+
     console.error("Error getting Merchant Centers:", error);
     return [];
   }
@@ -291,6 +404,10 @@ export async function getGoogleAnalyticsProperties(
 
     return properties;
   } catch (error) {
+    if (getGoogleApiErrorStatus(error) === 401) {
+      throw error;
+    }
+
     console.error("Error getting Analytics properties:", error);
     return [];
   }
@@ -325,21 +442,59 @@ export async function getGoogleAnalyticsDataStreams(
     );
 
     if (!response.ok) {
-      console.warn("GA4 data streams API failed", response.status, await response.text());
+      const errorBody = await response.text();
+
+      console.warn(
+        "GA4 data streams API failed",
+        response.status,
+        errorBody
+      );
+
+      if (response.status === 401) {
+        throw createGoogleApiError(
+          "GA4 data streams access token was rejected.",
+          response.status,
+          errorBody
+        );
+      }
+
       return [];
     }
 
-    const data = await response.json();
+    const data =
+      (await response.json()) as Ga4DataStreamsResponse;
 
     return (data.dataStreams || [])
-      .filter((stream: any) => stream.type === "WEB_DATA_STREAM" && stream.webStreamData?.measurementId)
-      .map((stream: any) => ({
-        streamId: String(stream.name || "").split("/").pop() || stream.name,
-        displayName: stream.displayName || stream.webStreamData?.defaultUri || stream.name,
-        measurementId: stream.webStreamData.measurementId,
-        propertyId: cleanPropertyId,
-      }));
+      .filter(
+        (stream) =>
+          stream.type === "WEB_DATA_STREAM" &&
+          Boolean(stream.webStreamData?.measurementId)
+      )
+      .map((stream) => {
+        const streamName = String(stream.name || "");
+        const measurementId = String(
+          stream.webStreamData?.measurementId || ""
+        );
+
+        return {
+          streamId:
+            streamName.split("/").pop() ||
+            streamName ||
+            measurementId,
+          displayName:
+            stream.displayName ||
+            stream.webStreamData?.defaultUri ||
+            streamName ||
+            measurementId,
+          measurementId,
+          propertyId: cleanPropertyId,
+        };
+      });
   } catch (error) {
+    if (getGoogleApiErrorStatus(error) === 401) {
+      throw error;
+    }
+
     console.warn("Failed to load GA4 data streams", error);
     return [];
   }
