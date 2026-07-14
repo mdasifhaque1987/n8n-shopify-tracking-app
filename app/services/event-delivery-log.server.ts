@@ -1,3 +1,4 @@
+import type { Prisma } from "@prisma/client";
 import db from "../db.server";
 import { stripUrlQuery, type NormalizedTrackingEvent } from "./normalize-event.server";
 import { sanitizeForEventLog } from "./security/event-security.server";
@@ -109,7 +110,7 @@ export async function createEventDeliveryLog(data: {
   event: NormalizedTrackingEvent;
   platform?: string;
   deliveryType?: string;
-  status: "received" | "success" | "failed" | "skipped";
+  status: "received" | "success" | "sent" | "failed" | "skipped";
   message?: string;
   responsePayload?: Record<string, unknown> | null;
 }) {
@@ -124,7 +125,7 @@ export async function createEventDeliveryLog(data: {
       status: data.status,
       message: data.message,
       requestPayload: sanitizeTrackingEvent(data.event),
-      responsePayload: data.responsePayload ? (sanitizeForEventLog(data.responsePayload) as any) : null,
+      responsePayload: data.responsePayload ? (sanitizeForEventLog(data.responsePayload) as Prisma.InputJsonValue) : null,
     },
   });
 }

@@ -55,6 +55,8 @@ const ALLOWED_EVENTS = new Set([
 
   "purchase",
   "checkout_completed",
+  "add_payment_info",
+  "add_shipping_info",
 ]);
 
 const SENSITIVE_KEY_PATTERN =

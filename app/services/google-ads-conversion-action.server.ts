@@ -8,6 +8,7 @@ type GoogleAdsConversionActionInput = {
   eventName: string;
   baseName?: string;
   conversionValueMode?: ConversionValueMode;
+  isPrimary?: boolean;
 };
 
 type GoogleAdsConversionActionResult = {
@@ -95,9 +96,21 @@ function extractIdFromResourceName(resourceName?: string) {
   return match ? match[1] : undefined;
 }
 
-function extractTagDetails(action: any) {
-  const tagSnippets = action?.tagSnippets || action?.tag_snippets || [];
-  const combined = JSON.stringify(tagSnippets || []);
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function extractTagDetails(action: unknown) {
+  const actionRecord = isRecord(action) ? action : {};
+
+  const rawTagSnippets =
+    actionRecord.tagSnippets ?? actionRecord.tag_snippets;
+
+  const tagSnippets = Array.isArray(rawTagSnippets)
+    ? rawTagSnippets
+    : [];
+
+  const combined = JSON.stringify(tagSnippets);
 
   const sendToMatch =
     combined.match(/AW-(\d+)\/([A-Za-z0-9_-]+)/) ||
@@ -105,10 +118,18 @@ function extractTagDetails(action: any) {
 
   const awOnlyMatch = combined.match(/AW-(\d+)/);
 
+  let resourceName: string | undefined;
+
+  if (typeof actionRecord.resourceName === "string") {
+    resourceName = actionRecord.resourceName;
+  } else if (typeof actionRecord.resource_name === "string") {
+    resourceName = actionRecord.resource_name;
+  }
+
   const conversionId =
     sendToMatch?.[1] ||
     awOnlyMatch?.[1] ||
-    extractIdFromResourceName(action?.resourceName || action?.resource_name);
+    extractIdFromResourceName(resourceName);
 
   const conversionLabel = sendToMatch?.[2];
 

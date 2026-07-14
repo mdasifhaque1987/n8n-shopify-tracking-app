@@ -107,6 +107,7 @@ export type EventName =
   | "add_to_cart"
   | "begin_checkout"
   | "add_payment_info"
+  | "add_shipping_info"
   | "purchase"
   | "search"
   | "sign_up"
