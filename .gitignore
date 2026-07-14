@@ -33,3 +33,12 @@ database.sqlite
 *.p12
 *.pfx
 security-precheck-report.txt
+
+# Local development and diagnostic artifacts
+/backups/
+/deploy-latest-attempt.log
+/qa-build.log
+/shopify-dev-test.log
+*.bak
+*.before-*
+/shopify.app.n8n-tracking-dh*.toml
