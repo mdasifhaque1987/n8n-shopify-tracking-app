@@ -1,8 +1,8 @@
 // OAuth initialization route for TikTok
 import type { LoaderFunctionArgs } from "react-router";
-import { generateSecureState } from "../../../lib/encryption.server";
-import { getTikTokAuthUrl } from "../../../services/oauth/tiktok.server";
-import db from "../../../db.server";
+import { generateSecureState } from "../lib/encryption.server";
+import { getTikTokAuthUrl } from "../services/oauth/tiktok.server";
+import db from "../db.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);

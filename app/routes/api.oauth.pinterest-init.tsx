@@ -1,8 +1,8 @@
-// OAuth initialization route for Meta
+// OAuth initialization route for Pinterest
 import type { LoaderFunctionArgs } from "react-router";
-import { generateSecureState } from "../../../lib/encryption.server";
-import { getMetaAuthUrl } from "../../../services/oauth/meta.server";
-import db from "../../../db.server";
+import { generateSecureState } from "../lib/encryption.server";
+import { getPinterestAuthUrl } from "../services/oauth/pinterest.server";
+import db from "../db.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -20,13 +20,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     data: {
       state,
       workspaceId,
-      platform: "META",
+      platform: "PINTEREST",
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     },
   });
 
   // Get authorization URL
-  const authUrl = getMetaAuthUrl(state);
+  const authUrl = getPinterestAuthUrl(state);
 
   return Response.redirect(authUrl);
 }

@@ -1,8 +1,8 @@
-// OAuth initialization route for Google
+// OAuth initialization route for LinkedIn
 import type { LoaderFunctionArgs } from "react-router";
-import { generateSecureState } from "../../../lib/encryption.server";
-import { getGoogleAuthUrl } from "../../../services/oauth/google.server";
-import db from "../../../db.server";
+import { generateSecureState } from "../lib/encryption.server";
+import { getLinkedInAuthUrl } from "../services/oauth/linkedin.server";
+import db from "../db.server";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const url = new URL(request.url);
@@ -20,13 +20,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
     data: {
       state,
       workspaceId,
-      platform: "GOOGLE_ADS",
+      platform: "LINKEDIN",
       expiresAt: new Date(Date.now() + 10 * 60 * 1000),
     },
   });
 
   // Get authorization URL
-  const authUrl = getGoogleAuthUrl(state);
+  const authUrl = getLinkedInAuthUrl(state);
 
   return Response.redirect(authUrl);
 }

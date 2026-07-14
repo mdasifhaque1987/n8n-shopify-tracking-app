@@ -1,6 +1,6 @@
-// OAuth callback handler for Google
+// OAuth callback handler for Meta / Facebook
 import type { LoaderFunctionArgs } from "react-router";
-import { exchangeGoogleCode } from "../services/oauth/google.server";
+import { exchangeMetaCode } from "../services/oauth/meta.server";
 import { createPlatformConnection } from "../services/platform-connection.server";
 import db from "../db.server";
 
@@ -13,7 +13,7 @@ function decodeStatePayload(state: string): {
     const decoded = Buffer.from(state, "base64url").toString("utf8");
     return JSON.parse(decoded);
   } catch (error) {
-    console.error("Unable to decode OAuth state payload:", error);
+    console.error("Unable to decode Meta OAuth state payload:", error);
     return {};
   }
 }
@@ -44,9 +44,6 @@ function buildShopifyAdminReturnUrl(shop?: string, returnPath?: string) {
   }
 
   const storeHandle = getShopifyStoreHandle(shop);
-
-  // Your current Shopify admin app handle is home-39.
-  // Later, if Shopify changes it, add SHOPIFY_ADMIN_APP_HANDLE in .env.
   const appHandle = process.env.SHOPIFY_ADMIN_APP_HANDLE || "home-39";
   const path = safeReturnPath(returnPath);
 
@@ -131,10 +128,11 @@ export async function loader({ request }: LoaderFunctionArgs) {
   );
 
   if (error) {
-    console.error("Google OAuth error:", error);
+    console.error("Meta OAuth error:", error);
+
     return htmlPage(
-      "Google connection failed",
-      `Google returned error: ${error}`,
+      "Meta connection failed",
+      `Meta returned error: ${error}`,
       "error",
       returnUrl
     );
@@ -142,7 +140,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   if (!code || !state) {
     return htmlPage(
-      "Google connection failed",
+      "Meta connection failed",
       "Missing code or state.",
       "error",
       returnUrl
@@ -156,7 +154,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     if (!oauthState) {
       return htmlPage(
-        "Google connection failed",
+        "Meta connection failed",
         "Invalid state parameter.",
         "error",
         returnUrl
@@ -167,36 +165,39 @@ export async function loader({ request }: LoaderFunctionArgs) {
       await db.oAuthState.delete({ where: { state } });
 
       return htmlPage(
-        "Google connection failed",
+        "Meta connection failed",
         "State parameter expired. Please try connecting again.",
         "error",
         returnUrl
       );
     }
 
-    const tokenData = await exchangeGoogleCode(code);
+    const tokenData = await exchangeMetaCode(code);
 
     await createPlatformConnection({
       workspaceId: oauthState.workspaceId,
-      platform: "GOOGLE_ADS",
-      accountId: tokenData.email,
-      accountName: tokenData.email,
+      platform: "META",
+      accountId: tokenData.userId,
+      accountName: tokenData.userName || tokenData.userId,
       accessToken: tokenData.accessToken,
-      refreshToken: tokenData.refreshToken,
       tokenExpiresAt: tokenData.expiresAt,
-      scopes: ["adwords", "analytics", "userinfo", "content"],
+      scopes: [
+        "ads_management",
+        "ads_read",
+        "business_management",
+                        ],
     });
 
     await db.oAuthState.delete({ where: { state } });
 
     return htmlPage(
-      "Google connected",
-      "Google account connected successfully.",
+      "Meta connected",
+      "Meta account connected successfully.",
       "success",
       returnUrl
     );
   } catch (error) {
-    console.error("Error in Google OAuth callback:", error);
+    console.error("Error in Meta OAuth callback:", error);
 
     const message =
       error instanceof Error
@@ -204,7 +205,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         : JSON.stringify(error);
 
     return htmlPage(
-      "Google connection failed",
+      "Meta connection failed",
       `Debug error: ${message}`,
       "error",
       returnUrl

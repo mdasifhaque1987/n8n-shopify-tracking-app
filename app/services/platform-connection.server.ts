@@ -209,7 +209,8 @@ export async function getGooglePlatformConnection(workspaceId: string) {
     },
   });
 
-  const workspaceGoogleConnection = workspaceConnections.find((connection) =>
+  const workspaceGoogleConnection = workspaceConnections.find(
+    (connection: (typeof workspaceConnections)[number]) =>
     isGooglePlatform(connection.platform)
   );
 
@@ -226,5 +227,10 @@ export async function getGooglePlatformConnection(workspaceId: string) {
     },
   });
 
-  return activeConnections.find((connection) => isGooglePlatform(connection.platform)) || null;
+  return (
+    activeConnections.find(
+      (connection: (typeof activeConnections)[number]) =>
+        isGooglePlatform(connection.platform)
+    ) || null
+  );
 }
