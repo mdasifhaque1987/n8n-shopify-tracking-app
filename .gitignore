@@ -42,3 +42,7 @@ security-precheck-report.txt
 *.bak
 *.before-*
 /shopify.app.n8n-tracking-dh*.toml
+
+# Local API diagnostic scripts
+/scripts/check-merchant-api.mjs
+/scripts/google-ads-permission-check.mjs
