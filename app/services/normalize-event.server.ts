@@ -1,8 +1,12 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 export type NormalizedTrackingEvent = {
   shop?: string | null;
   event_name: string;
+  meta_event?: string | null;
   event_id: string;
   event_time: number;
+  client_id?: string | null;
+  transaction_id?: string | null;
 
   page_location?: string | null;
   page_title?: string | null;
@@ -12,6 +16,7 @@ export type NormalizedTrackingEvent = {
   customer?: Record<string, unknown> | null;
   ecommerce?: Record<string, unknown> | null;
   consent?: Record<string, unknown> | null;
+  meta?: Record<string, unknown> | null;
   raw?: Record<string, unknown> | null;
 };
 
@@ -26,6 +31,8 @@ const allowedEvents = new Set([
   "add_shipping_info",
   "add_payment_info",
   "purchase",
+  "search",
+  "add_contact_info",
   "sign_up",
   "generate_lead",
 ]);
@@ -75,6 +82,8 @@ function buildRawTrackingObject(payload: any): Record<string, unknown> | null {
     "shipping",
     "transaction_id",
     "order_id",
+    "checkout_token",
+    "checkout_id",
     "items"
   ];
 
@@ -140,6 +149,7 @@ export function normalizeIncomingEvent(payload: any): NormalizedTrackingEvent {
       null,
 
     event_name: eventName,
+    meta_event: stringOrNull(payload.meta_event) || stringOrNull(payload.metaEvent) || null,
     event_id: safeEventId(eventName, payload),
     event_time: numberOrNow(payload.event_time || payload.eventTime),
 
@@ -166,6 +176,7 @@ export function normalizeIncomingEvent(payload: any): NormalizedTrackingEvent {
     customer: getNestedObject(payload, "customer"),
     ecommerce: getNestedObject(payload, "ecommerce"),
     consent: getNestedObject(payload, "consent"),
+    meta: getNestedObject(payload, "meta"),
     raw: buildRawTrackingObject(payload),
   };
 }

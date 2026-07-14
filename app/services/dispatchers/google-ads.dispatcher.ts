@@ -598,7 +598,7 @@ async function dispatchPurchaseToGoogleAdsApi(
     return {
       success: true,
       status: "success",
-      message: Boolean(options.validateOnly || options.testMode)
+      message: options.validateOnly || options.testMode
         ? "Google Ads server-side purchase validation succeeded."
         : "Google Ads server-side purchase sent successfully.",
       responsePayload,
