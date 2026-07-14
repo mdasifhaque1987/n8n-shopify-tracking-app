@@ -1,0 +1,24 @@
+# Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
+
+client_id = "5e6f911a2892c8c18cd47d5e96596f80"
+name = "DH Conversions"
+application_url = "https://tracking.datahatches.com"
+embedded = true
+
+[build]
+automatically_update_urls_on_dev = true
+
+[webhooks]
+api_version = "2026-07"
+
+[access_scopes]
+# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
+scopes = "read_customer_events,read_customers,read_inventory,read_locations,read_markets,read_orders,read_product_listings,read_products,write_pixels,write_app_proxy,read_pixels"
+
+[auth]
+redirect_urls = [ "https://tracking.datahatches.com/auth/shopify/callback" ]
+
+[app_proxy]
+url = "https://tracking.datahatches.com/api/events/track"
+prefix = "apps"
+subpath = "dh-track"
