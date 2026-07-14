@@ -1,15 +1,27 @@
 import db from "../db.server";
 import { resolveGoogleAccessToken } from "../services/google-token.server";
-import { useState } from "react";
-import { useFetcher, useLoaderData, useLocation, useNavigate } from "react-router";
-import { getGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
-import { saveGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
+import { useState, type CSSProperties, type ReactNode } from "react";
+import {
+  Link,
+  useFetcher,
+  useLoaderData,
+  useLocation,
+  useNavigate,
+  type ActionFunctionArgs,
+  type LoaderFunctionArgs,
+} from "react-router";
+import {
+  getGa4DeliverySettings,
+  saveGa4DeliverySettings,
+} from "../services/ga4-delivery-settings.server";
 import { createOrReuseGoogleAdsConversionAction } from "../services/google-ads-conversion-action.server";
 import { saveGoogleAdsConversionAction } from "../services/google-ads-conversion-action-map.server";
 import { saveGoogleConversionConfig } from "../services/google-conversion-config.server";
 import { createMerchantCenterFeed } from "../services/merchant-center-feed.server";
-import { getAssetSelections } from "../services/asset-selection.server";
-import { saveAssetSelection } from "../services/asset-selection.server";
+import {
+  getAssetSelections,
+  saveAssetSelection,
+} from "../services/asset-selection.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
 import { authenticate } from "../shopify.server";
 import {
@@ -23,6 +35,7 @@ import {
   getGoogleAdsAccounts,
   getMerchantCenters,
 } from "../services/oauth/google.server";
+import { getMetaBusinessPortfolios, getMetaDatasetsForBusiness } from "../services/oauth/meta.server";
 
 import { getTestModeSettings, saveTestModeSettings } from "../services/test-mode.server";
 async function withTimeout<T>(
@@ -71,6 +84,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (embedded) navParams.set("embedded", embedded);
   if (locale) navParams.set("locale", locale);
   const shouldLoadGa4Assets = url.searchParams.get("loadGa4Assets") === "true" || url.searchParams.get("loadGoogleAssets") === "true";
+  const shouldLoadMetaAssets = url.searchParams.get("loadMetaAssets") === "true";
 
   const getStatus = (platform: string) => {
     const connection = savedConnections.find(
@@ -91,12 +105,20 @@ export async function loader({ request }: LoaderFunctionArgs) {
       googleAdsAccounts: AssetOption[];
       merchantCenters: AssetOption[];
     };
+    meta: {
+      businessPortfolios: AssetOption[];
+      datasetsPixels: AssetOption[];
+    };
   } = {
     google: {
       ga4Properties: [],
       ga4DataStreams: [],
       googleAdsAccounts: [],
       merchantCenters: [],
+    },
+    meta: {
+      businessPortfolios: [],
+      datasetsPixels: [],
     },
   };
 
@@ -162,6 +184,47 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
   }
 
+  const metaConnection = savedConnections.find(
+    (item) => item.platform === "META" && item.isActive
+  );
+
+  if (metaConnection) {
+    const decryptedMetaConnection = await getPlatformConnection(metaConnection.id);
+
+    if (decryptedMetaConnection?.decryptedAccessToken) {
+      const businessPortfolios = await withTimeout(
+        getMetaBusinessPortfolios(decryptedMetaConnection.decryptedAccessToken),
+        [],
+        12000
+      );
+
+      assets.meta.businessPortfolios = businessPortfolios.map((business) => ({
+        value: business.businessId,
+        label: `${business.name} (${business.businessId})`,
+      }));
+
+      const savedMetaBusinessId = String(
+        savedAssetSelections["meta:Meta Business Portfolio"] || ""
+      ).trim();
+
+      if (savedMetaBusinessId) {
+        const datasetsPixels = await withTimeout(
+          getMetaDatasetsForBusiness(
+            decryptedMetaConnection.decryptedAccessToken,
+            savedMetaBusinessId
+          ),
+          [],
+          12000
+        );
+
+        assets.meta.datasetsPixels = datasetsPixels.map((dataset) => ({
+          value: dataset.datasetId,
+          label: `${dataset.name} (${dataset.datasetId})`,
+        }));
+      }
+    }
+  }
+
   const savedGoogleAdsCustomerId = String(
     savedAssetSelections["google:Google Ads Account / Manager Account"] ||
       savedAssetSelections["GOOGLE_ADS:Google Ads Account / Manager Account"] ||
@@ -198,6 +261,7 @@ id: true,
     shop: session.shop,
     navQuery: navParams.toString(),
     shouldLoadGa4Assets,
+    shouldLoadMetaAssets,
     connections: {
       google: getStatus("GOOGLE_ADS"),
       meta: getStatus("META"),
@@ -267,6 +331,89 @@ export async function action({ request }: ActionFunctionArgs) {
     });
   }
 
+  if (actionType === "save_meta_dataset_settings") {
+    const datasetId = String(formData.get("datasetId") || "").trim();
+    const datasetName = String(formData.get("datasetName") || "").trim();
+    const selectedEvents = String(formData.get("selectedEvents") || "none").trim() || "none";
+    const clientSideEnabled =
+      String(formData.get("clientSideEnabled") || "false") === "true";
+    const serverSideEnabled =
+      String(formData.get("serverSideEnabled") || "false") === "true";
+    const testEventCode = String(formData.get("testEventCode") || "").trim();
+    const contentIdFormat = String(formData.get("contentIdFormat") || "shopify_country_product_variant").trim();
+    const capiAccessToken = String(formData.get("capiAccessToken") || "").trim();
+
+    if (!datasetId) {
+      return Response.json(
+        { ok: false, error: "Please select a Meta Dataset / Pixel first." },
+        { status: 400 }
+      );
+    }
+
+    await saveAssetSelection({
+      workspaceId: workspace.id,
+      platform: "meta",
+      assetType: "Meta Dataset / Pixel",
+      assetValue: datasetId,
+      assetLabel: datasetName || datasetId,
+    });
+
+    await saveAssetSelection({
+      workspaceId: workspace.id,
+      platform: "meta",
+      assetType: "Meta Selected Events",
+      assetValue: selectedEvents,
+      assetLabel: selectedEvents === "none" ? "No events selected" : selectedEvents,
+    });
+
+    await saveAssetSelection({
+      workspaceId: workspace.id,
+      platform: "meta",
+      assetType: "Meta Client Side Enabled",
+      assetValue: clientSideEnabled ? "true" : "false",
+      assetLabel: clientSideEnabled ? "Enabled" : "Disabled",
+    });
+
+    await saveAssetSelection({
+      workspaceId: workspace.id,
+      platform: "meta",
+      assetType: "Meta Server Side Enabled",
+      assetValue: serverSideEnabled ? "true" : "false",
+      assetLabel: serverSideEnabled ? "Enabled" : "Disabled",
+    });
+
+    await saveAssetSelection({
+      workspaceId: workspace.id,
+      platform: "meta",
+      assetType: "Meta Test Event Code",
+      assetValue: testEventCode || "none",
+      assetLabel: testEventCode || "No test event code",
+    });
+
+    await saveAssetSelection({
+      workspaceId: workspace.id,
+      platform: "meta",
+      assetType: "Meta Content ID Format",
+      assetValue: contentIdFormat,
+      assetLabel: contentIdFormat,
+    });
+
+    if (capiAccessToken) {
+      await saveAssetSelection({
+        workspaceId: workspace.id,
+        platform: "meta",
+        assetType: "Meta CAPI Access Token",
+        assetValue: capiAccessToken,
+        assetLabel: `Saved token ending ${capiAccessToken.slice(-6)}`,
+      });
+    }
+
+    return Response.json({
+      ok: true,
+      message: "Meta Dataset / Pixel settings saved.",
+    });
+  }
+
   if (actionType === "save_ga4_delivery_settings") {
     const propertyId = String(formData.get("propertyId") || "");
     const measurementId = String(formData.get("measurementId") || "").trim();
@@ -327,7 +474,7 @@ export async function action({ request }: ActionFunctionArgs) {
     const singleEventName = String(formData.get("eventName") || "").trim();
     const events = singleEventName
       ? [singleEventName]
-      : formData.getAll("events").map((event) => String(event));
+      : formData.getAll("events").map((event: unknown) => String(event));
 
     if (!googleAdsCustomerId) {
       return Response.json(
@@ -495,7 +642,10 @@ export async function action({ request }: ActionFunctionArgs) {
             id: config.id,
           },
           data: {
-            events: config.events.filter((event) => event !== conversionAction.eventName),
+            events: config.events.filter(
+              (event: (typeof config.events)[number]) =>
+                event !== conversionAction.eventName
+            ),
           },
         });
       }
@@ -595,6 +745,21 @@ export async function action({ request }: ActionFunctionArgs) {
   return Response.json({ ok: false, error: "Unknown action" }, { status: 400 });
 }
 
+const metaEventOptions = [
+  { value: "PageView", label: "PageView" },
+  { value: "ViewContent", label: "ViewContent" },
+  { value: "Search", label: "Search" },
+  { value: "AddToCart", label: "AddToCart" },
+  { value: "InitiateCheckout", label: "InitiateCheckout" },
+  { value: "AddPaymentInfo", label: "AddPaymentInfo" },
+  { value: "AddShippingInfo", label: "AddShippingInfo - custom event" },
+  { value: "Purchase", label: "Purchase" },
+  { value: "Lead", label: "Lead" },
+  { value: "CompleteRegistration", label: "CompleteRegistration" },
+  { value: "Contact", label: "Contact" },
+  { value: "Subscribe", label: "Subscribe" },
+];
+
 const platformConfigs = [
   {
     key: "google",
@@ -609,8 +774,8 @@ const platformConfigs = [
     name: "Meta",
     connectText: "Connect Meta",
     oauthPath: "/api/oauth/meta-init",
-    description: "Select Meta Business Manager, ad account, pixel, dataset, and catalog.",
-    fields: ["Meta Business Manager", "Meta Ad Account", "Meta Pixel", "Meta Dataset", "Meta Catalog"],
+    description: "Connect Meta and allow Business Portfolio access. To show all portfolios, choose all current and future Businesses in the Meta permission screen. Then select the Business Portfolio inside this app.",
+    fields: ["Meta Business Portfolio", "Meta Dataset / Pixel"],
   },
   {
     key: "tiktok",
@@ -649,6 +814,7 @@ const platformConfigs = [
 export default function ConfigurationPage() {
   const {
     shop,
+    navQuery,
     connections,
     assets,
     savedAssetSelections,
@@ -659,12 +825,23 @@ export default function ConfigurationPage() {
   const location = useLocation();
   const navigate = useNavigate();
   const withNav = (path: string) => {
-    const params = new URLSearchParams(location.search);
-    if (!params.get("shop")) params.set("shop", shop);
-    return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
+    const [basePath, existingQuery = ""] = path.split("?");
+    const params = new URLSearchParams(existingQuery);
+    const navParams = new URLSearchParams(navQuery || location.search);
+
+    if (!navParams.get("shop")) {
+      navParams.set("shop", shop);
+    }
+
+    navParams.forEach((value, key) => {
+      if (!params.has(key)) {
+        params.set(key, value);
+      }
+    });
+
+    return `${basePath}?${params.toString()}`;
   };
-  const withShop = (path: string) => `${path}${path.includes("?") ? "&" : "?"}shop=${encodeURIComponent(shop)}`;
-  const [activeModal, setActiveModal] = useState<"ga4" | "conversions" | "feed" | "remarketing" | null>(null);
+  const [activeModal, setActiveModal] = useState<"ga4" | "conversions" | "feed" | "remarketing" | "metaBusiness" | "metaDataset" | null>(null);
   const conversionFetcher = useFetcher();
   const deleteConversionFetcher = useFetcher();
   const deleteConversionResult = deleteConversionFetcher.data as
@@ -676,6 +853,52 @@ export default function ConfigurationPage() {
   const [selectedAssets, setSelectedAssets] =
     useState<Record<string, string>>(savedAssetSelections || {});
   const assetSelectionFetcher = useFetcher();
+  const metaBusinessOptions = assets.meta?.businessPortfolios || [];
+  const metaBusinessKey = "meta:Meta Business Portfolio";
+  const metaBusinessValue = selectedAssets[metaBusinessKey] || "";
+  const selectedMetaBusinessLabel =
+    metaBusinessOptions.find((option) => option.value === metaBusinessValue)?.label ||
+    metaBusinessValue ||
+    "";
+
+  const metaDatasetOptions = assets.meta?.datasetsPixels || [];
+  const metaDatasetKey = "meta:Meta Dataset / Pixel";
+  const metaDatasetValue = selectedAssets[metaDatasetKey] || "";
+  const selectedMetaDatasetLabel =
+    metaDatasetOptions.find((option) => option.value === metaDatasetValue)?.label ||
+    metaDatasetValue ||
+    "";
+
+  const metaEventsKey = "meta:Meta Selected Events";
+  const rawMetaSelectedEvents = selectedAssets[metaEventsKey] || "none";
+  const metaSelectedEvents =
+    rawMetaSelectedEvents === "none"
+      ? []
+      : rawMetaSelectedEvents.split(",").map((item) => item.trim()).filter(Boolean);
+
+  const metaClientSideEnabled =
+    selectedAssets["meta:Meta Client Side Enabled"] === "true";
+  const metaServerSideEnabled =
+    selectedAssets["meta:Meta Server Side Enabled"] === "true";
+  const metaTestEventCode =
+    selectedAssets["meta:Meta Test Event Code"] === "none"
+      ? ""
+      : selectedAssets["meta:Meta Test Event Code"] || "";
+
+  const metaContentIdFormat =
+    selectedAssets["meta:Meta Content ID Format"] || "shopify_country_product_variant";
+
+  const [metaCapiAccessTokenInput, setMetaCapiAccessTokenInput] = useState("");
+  const [metaCapiAccessTokenSavedOverride, setMetaCapiAccessTokenSavedOverride] = useState(false);
+
+  const metaCapiAccessTokenSaved =
+    Boolean(selectedAssets["meta:Meta CAPI Access Token"]) || metaCapiAccessTokenSavedOverride;
+
+  const metaCapiAccessTokenLabel =
+    metaCapiAccessTokenSaved
+      ? "Access token saved"
+      : "No CAPI access token saved";
+
   const feedFetcher = useFetcher();
   const feedResult = feedFetcher.data as
     | {
@@ -703,11 +926,23 @@ export default function ConfigurationPage() {
     ga4DeliverySettings?.setting?.deliveryMode === "server" ? "server" : "client"
   );
 
+  // Reserved for the upcoming catalog/feed configuration UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedTargetCountry, setFeedTargetCountry] = useState("US");
+  // Reserved for the upcoming catalog/feed configuration UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedCustomTargetCountry, setFeedCustomTargetCountry] = useState("");
+  // Reserved for the upcoming catalog/feed configuration UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedProductIdFormat, setFeedProductIdFormat] = useState("shopify_country_product_variant");
+  // Reserved for the upcoming catalog/feed configuration UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedChannel, setFeedChannel] = useState("online");
+  // Reserved for the upcoming catalog/feed configuration UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedMarketingMethod, setFeedMarketingMethod] = useState("all");
+  // Reserved for the upcoming catalog/feed configuration UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedIncludeRestrictedProducts, setFeedIncludeRestrictedProducts] = useState(false);
 
   const ga4PropertyValue =
@@ -820,6 +1055,8 @@ export default function ConfigurationPage() {
     return false;
   }
 
+  // Reserved for the upcoming per-platform server-side UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function supportsServerSide(platformKey: string, field: string) {
     return (
       platformKey === "google" &&
@@ -831,6 +1068,8 @@ export default function ConfigurationPage() {
     );
   }
 
+  // Reserved for the upcoming per-platform server-side UI.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function isServerSideEnabled(platformKey: string, field: string) {
     return selectedAssets[settingKey(platformKey, field, "server_side")] === "true";
   }
@@ -993,6 +1232,8 @@ export default function ConfigurationPage() {
       .filter(Boolean);
   }
 
+  // Reserved for the upcoming remarketing event selector.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   function updateRemarketingEvent(eventName: string, checked: boolean) {
     const current = new Set(getSelectedRemarketingEvents());
 
@@ -1253,9 +1494,9 @@ export default function ConfigurationPage() {
         </div>
 
         <div style={styles.buttonRow}>
-          <a href="/app/activate-pixel" style={styles.primaryButton}>
+          <Link to={withNav("/app/activate-pixel")} style={styles.primaryButton}>
             Activate Pixel
-          </a>
+          </Link>
           <button type="button" style={styles.secondaryButton}>
             Deactivate Coming Soon
           </button>
@@ -1265,14 +1506,19 @@ export default function ConfigurationPage() {
       <section style={styles.section}>
         <h2 style={styles.sectionTitle}>Platform Asset Configuration</h2>
         <p style={styles.helpText}>
-          GA4, Google Ads, Merchant Center, Meta Business Manager, ad accounts, pixels, datasets, and catalogs appear only after the platform is connected.
+          GA4, Google Ads, Merchant Center, Meta Business Portfolio, datasets/pixels, and supported platform assets appear only after the platform is connected.
         </p>
 
         <div style={styles.grid}>
           {platformConfigs.map((platform) => {
             const connection = connections[platform.key as keyof typeof connections];
             const isConnected = connection?.connected;
-            const oauthUrl = `${platform.oauthPath}?shop=${shop}`;
+            const oauthParams = new URLSearchParams({
+    shop,
+    returnPath: "/app/settings",
+      });
+
+      const oauthUrl = `${platform.oauthPath}?${oauthParams.toString()}`;
 
             return (
               <article
@@ -1323,7 +1569,162 @@ export default function ConfigurationPage() {
                   </div>
                 )}
 
-                {isConnected && (
+                {isConnected && platform.key === "meta" && (
+                  <div style={styles.fieldStack}>
+                    <div
+                      style={{
+                        display: "grid",
+                        gap: 12,
+                        padding: "12px",
+                        border: "1px solid #d1fae5",
+                        borderRadius: 12,
+                        background: "#f0fdf4",
+                      }}
+                    >
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <strong>Business Portfolio</strong>
+                        <span style={{ color: "#6b7280", fontSize: 13 }}>
+                          Select the Meta Business Portfolio that owns the Dataset / Pixel.
+                        </span>
+                        <div style={{ display: "grid", gap: 6 }}>
+                          {selectedMetaBusinessLabel ? (
+                            <span style={{ color: "#166534", fontSize: 12, fontWeight: 700 }}>
+                              Selected: {selectedMetaBusinessLabel}
+                            </span>
+                          ) : (
+                            <span style={{ color: "#92400e", fontSize: 12, fontWeight: 700 }}>
+                              No Business Portfolio selected yet.
+                            </span>
+                          )}
+
+                          {metaBusinessOptions.length > 0 ? (
+                            <button
+                              type="button"
+                              style={styles.inlineActionButton}
+                              onClick={() => setActiveModal("metaBusiness")}
+                            >
+                              Configure Business Portfolio
+                            </button>
+                          ) : (
+                            <div
+                              style={{
+                                padding: "10px 12px",
+                                border: "1px solid #fde68a",
+                                borderRadius: 10,
+                                background: "#fffbeb",
+                                color: "#92400e",
+                                fontWeight: 700,
+                                lineHeight: 1.6,
+                              }}
+                            >
+                              No Business Portfolios loaded. Reconnect Meta with a user that has access to a Meta Business Portfolio, then reopen this page from Shopify Admin.
+                            </div>
+                          )}
+
+                          <small style={{ color: "#6b7280", fontWeight: 700 }}>
+                            Temporary unlocked mode: you can change this Business Portfolio while setup is in progress.
+                          </small>
+                        </div>
+                      </div>
+
+                      <div style={{ display: "grid", gap: 6 }}>
+                        <strong>Dataset / Pixel</strong>
+                        <span style={{ color: "#6b7280", fontSize: 13 }}>
+                          Configure Dataset / Pixel, Test Event Code, selected events, client-side Pixel, and server-side CAPI.
+                        </span>
+                        {selectedMetaDatasetLabel ? (
+                          <span style={{ color: "#166534", fontSize: 12, fontWeight: 700 }}>
+                            Selected: {selectedMetaDatasetLabel}
+                          </span>
+                        ) : (
+                          <span style={{ color: "#92400e", fontSize: 12, fontWeight: 700 }}>
+                            No Dataset / Pixel selected yet.
+                          </span>
+                        )}
+
+                        {!metaBusinessValue ? (
+                          <button
+                            type="button"
+                            style={styles.disabledButton}
+                            disabled
+                            title="Select Meta Business Portfolio first."
+                          >
+                            Select Business Portfolio First
+                          </button>
+                        ) : metaDatasetOptions.length > 0 ? (
+                          <button
+                            type="button"
+                            style={styles.inlineActionButton}
+                            onClick={() => setActiveModal("metaDataset")}
+                          >
+                            Configure Dataset / Pixel
+                          </button>
+                        ) : (
+                          <div
+                            style={{
+                              padding: "10px 12px",
+                              border: "1px solid #fde68a",
+                              borderRadius: 10,
+                              background: "#fffbeb",
+                              color: "#92400e",
+                              fontWeight: 700,
+                              lineHeight: 1.6,
+                            }}
+                          >
+                            No Dataset / Pixel loaded for the selected Business Portfolio. Make sure the connected Meta user has access to the Dataset / Pixel.
+                          </div>
+                        )}
+                      </div>
+
+                      <div
+                        style={{
+                          padding: "10px 12px",
+                          border: "1px solid #fde68a",
+                          borderRadius: 10,
+                          background: "#fffbeb",
+                          color: "#92400e",
+                          fontWeight: 700,
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        Meta Catalog setup is disabled for now because Meta rejected the catalog_management OAuth permission.
+                        Enable or approve catalog_management in Meta Developer settings before catalog creation and catalog sync.
+                      </div>
+
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "1fr 1fr",
+                          gap: 10,
+                          color: "#4b5563",
+                          fontSize: 12,
+                          lineHeight: 1.6,
+                        }}
+                      >
+                        <div>
+                          <strong>Client-side Pixel:</strong> {metaClientSideEnabled ? "Enabled" : "Disabled"}
+                        </div>
+                        <div>
+                          <strong>Server-side CAPI:</strong> {metaServerSideEnabled ? "Enabled" : "Disabled"}
+                        </div>
+                        <div>
+                          <strong>Selected Events:</strong> {metaSelectedEvents.length}
+                        </div>
+                        <div>
+                          <strong>Catalog Status:</strong> Permission required
+                        </div>
+                        <div>
+                          <strong>Content ID Format:</strong> {metaContentIdFormat}
+                        </div>
+                        <div>
+                          <strong>CAPI Access Token:</strong> {metaCapiAccessTokenSaved ? "Saved" : "Missing"}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {isConnected && platform.key !== "meta" && (
                   <>
                     <div style={styles.fieldStack}>
                       {platform.fields.map((field) => {
@@ -1542,6 +1943,55 @@ export default function ConfigurationPage() {
                                 <strong>Server Side:</strong> Events are collected by the app and sent from the backend/server to the selected platform.
                               </div>
                             )}
+
+                            {platform.key === "meta" && (
+                              <div
+                                style={{
+                                  gridColumn: "1 / -1",
+                                  display: "grid",
+                                  gap: 10,
+                                  padding: "12px",
+                                  borderTop: "1px solid #d1fae5",
+                                  color: "#4b5563",
+                                  fontSize: 12,
+                                  lineHeight: 1.6,
+                                }}
+                              >
+                                <div
+                                  style={{
+                                    padding: "10px 12px",
+                                    border: "1px solid #fde68a",
+                                    borderRadius: 10,
+                                    background: "#fffbeb",
+                                    color: "#92400e",
+                                    fontWeight: 700,
+                                  }}
+                                >
+                                  Meta Catalog setup is disabled for now because Meta rejected the catalog_management OAuth permission. Enable or approve catalog_management in Meta Developer settings before catalog creation and catalog sync.
+                                </div>
+
+                                <div
+                                  style={{
+                                    display: "grid",
+                                    gridTemplateColumns: "1fr 1fr",
+                                    gap: 10,
+                                  }}
+                                >
+                                  <div>
+                                    <strong>Client-side Pixel:</strong> {metaClientSideEnabled ? "Enabled" : "Disabled"} until Dataset / Pixel events are configured.
+                                  </div>
+                                  <div>
+                                    <strong>Server-side CAPI:</strong> {metaServerSideEnabled ? "Enabled" : "Disabled"} until CAPI setup is added in Phase 2.
+                                  </div>
+                                  <div>
+                                    <strong>Selected Events:</strong> {metaSelectedEvents.length}
+                                  </div>
+                                  <div>
+                                    <strong>Catalog Status:</strong> Permission required
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                     </div>
 
                   </>
@@ -1578,6 +2028,311 @@ export default function ConfigurationPage() {
         </div>
       </section>
 
+
+      {activeModal === "metaDataset" && (
+        <Modal title="Meta Dataset / Pixel Configuration" onClose={() => setActiveModal(null)}>
+          <div style={styles.modalGrid}>
+            <p style={{ color: "#4b5563", lineHeight: 1.6 }}>
+              Select the Meta Dataset / Pixel and choose which events DH Conversions should prepare for Meta tracking.
+              Client-side Pixel and Server-side CAPI are saved separately.
+            </p>
+
+            <label style={styles.label}>
+              Dataset / Pixel
+              <select
+                style={styles.select}
+                value={metaDatasetValue}
+                onChange={(event) => {
+                  const nextDatasetId = event.currentTarget.value;
+
+                  setSelectedAssets((previous) => ({
+                    ...previous,
+                    [metaDatasetKey]: nextDatasetId,
+                  }));
+                }}
+              >
+                <option value="">Select Dataset / Pixel</option>
+                {metaDatasetOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label style={styles.label}>
+              Meta Test Event Code
+              <input
+                style={styles.input}
+                value={metaTestEventCode}
+                placeholder="Optional test event code from Meta Events Manager"
+                onChange={(event) => {
+                  const nextCode = event.currentTarget.value;
+
+                  setSelectedAssets((previous) => ({
+                    ...previous,
+                    ["meta:Meta Test Event Code"]: nextCode,
+                  }));
+                }}
+              />
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                Use this only for testing CAPI events in Meta Events Manager later.
+              </small>
+            </label>
+
+            <label style={styles.label}>
+              Meta CAPI Access Token
+              <input
+                style={styles.input}
+                type="password"
+                value={metaCapiAccessTokenInput}
+                placeholder={metaCapiAccessTokenSaved ? "Token saved. Leave blank to keep current token." : "Paste Meta CAPI access token"}
+                onChange={(event) => {
+                  setMetaCapiAccessTokenInput(event.currentTarget.value);
+                }}
+              />
+              <small style={{ color: metaCapiAccessTokenSaved ? "#166534" : "#b45309", fontWeight: 700 }}>
+                {metaCapiAccessTokenLabel}. Server-side CAPI will not work without a valid access token.
+              </small>
+            </label>
+
+            <label style={styles.label}>
+              Content ID / Product ID Format
+              <select
+                style={styles.select}
+                value={metaContentIdFormat}
+                onChange={(event) => {
+                  const nextFormat = event.currentTarget.value;
+
+                  setSelectedAssets((previous) => ({
+                    ...previous,
+                    ["meta:Meta Content ID Format"]: nextFormat,
+                  }));
+                }}
+              >
+                {itemIdFormatOptions.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                Use the same format for Meta Pixel, CAPI, and future catalog item IDs.
+              </small>
+            </label>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <strong>Delivery Options</strong>
+
+              <label style={styles.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={metaClientSideEnabled}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+
+                    setSelectedAssets((previous) => ({
+                      ...previous,
+                      ["meta:Meta Client Side Enabled"]: checked ? "true" : "false",
+                    }));
+                  }}
+                />
+                Client-side Meta Pixel
+              </label>
+
+              <label style={styles.checkboxLabel}>
+                <input
+                  type="checkbox"
+                  checked={metaServerSideEnabled}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+
+                    setSelectedAssets((previous) => ({
+                      ...previous,
+                      ["meta:Meta Server Side Enabled"]: checked ? "true" : "false",
+                    }));
+                  }}
+                />
+                Server-side Meta CAPI
+              </label>
+            </div>
+
+            <div style={{ display: "grid", gap: 10 }}>
+              <strong>Meta Events</strong>
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                No events are selected by default. Select only the events the merchant wants to send.
+              </small>
+
+              <div style={styles.checkGrid}>
+                {metaEventOptions.map((eventOption) => {
+                  const checked = metaSelectedEvents.includes(eventOption.value);
+
+                  return (
+                    <label key={eventOption.value} style={styles.checkboxLabel}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={(event) => {
+                          const nextEvents = event.currentTarget.checked
+                            ? Array.from(new Set([...metaSelectedEvents, eventOption.value]))
+                            : metaSelectedEvents.filter((value) => value !== eventOption.value);
+
+                          setSelectedAssets((previous) => ({
+                            ...previous,
+                            [metaEventsKey]: nextEvents.length ? nextEvents.join(",") : "none",
+                          }));
+                        }}
+                      />
+                      {eventOption.label}
+                    </label>
+                  );
+                })}
+              </div>
+
+              {metaSelectedEvents.length === 0 && (
+                <small style={{ color: "#b45309", fontWeight: 700 }}>
+                  No Meta events selected yet.
+                </small>
+              )}
+            </div>
+
+            <div style={styles.modalActions}>
+              <button
+                type="button"
+                style={styles.secondaryButton}
+                onClick={() => setActiveModal(null)}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                style={metaDatasetValue ? styles.primaryButton : styles.disabledButton}
+                disabled={!metaDatasetValue}
+                onClick={() => {
+                  const selectedOption = metaDatasetOptions.find(
+                    (option) => option.value === metaDatasetValue
+                  );
+
+                  assetSelectionFetcher.submit(
+                    {
+                      _action: "save_meta_dataset_settings",
+                      datasetId: metaDatasetValue,
+                      datasetName: selectedOption?.label || metaDatasetValue,
+                      selectedEvents: metaSelectedEvents.length ? metaSelectedEvents.join(",") : "none",
+                      clientSideEnabled: metaClientSideEnabled ? "true" : "false",
+                      serverSideEnabled: metaServerSideEnabled ? "true" : "false",
+                      testEventCode: metaTestEventCode || "",
+                      contentIdFormat: metaContentIdFormat,
+                      capiAccessToken: metaCapiAccessTokenInput,
+                    },
+                    { method: "post" }
+                  );
+
+                  if (metaCapiAccessTokenInput.trim()) {
+                    setSelectedAssets((previous) => ({
+                      ...previous,
+                      ["meta:Meta CAPI Access Token"]: "__saved__",
+                    }));
+
+                    setMetaCapiAccessTokenInput("");
+                    setMetaCapiAccessTokenSavedOverride(true);
+                  }
+
+                  setActiveModal(null);
+                }}
+              >
+                Save Dataset / Pixel Settings
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+      {activeModal === "metaBusiness" && (
+        <Modal title="Meta Business Portfolio" onClose={() => setActiveModal(null)}>
+          <div style={styles.modalGrid}>
+            <p style={{ color: "#4b5563", lineHeight: 1.6 }}>
+              Select the Meta Business Portfolio that owns the Dataset / Pixel for this shop. If you do not see all portfolios, reconnect Meta and allow access to all current and future Businesses.
+              Found {metaBusinessOptions.length} Business Portfolio{metaBusinessOptions.length === 1 ? "" : "s"}.
+            </p>
+
+            {metaBusinessOptions.length === 0 ? (
+              <div
+                style={{
+                  padding: "12px",
+                  border: "1px solid #fde68a",
+                  borderRadius: 10,
+                  background: "#fffbeb",
+                  color: "#92400e",
+                  fontWeight: 700,
+                }}
+              >
+                No Business Portfolios loaded. Reconnect Meta with a user that has access to a Meta Business Portfolio, then reopen this page from Shopify Admin.
+              </div>
+            ) : (
+              <label style={styles.label}>
+                Business Portfolio
+                <select
+                  style={styles.select}
+                  value={metaBusinessValue}
+                  onChange={(event) => {
+                    const nextBusinessId = event.currentTarget.value;
+
+                    setSelectedAssets((previous) => ({
+                      ...previous,
+                      [metaBusinessKey]: nextBusinessId,
+                    }));
+                  }}
+                >
+                  <option value="">Select Business Portfolio</option>
+                  {metaBusinessOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            <div style={styles.modalActions}>
+              <button
+                type="button"
+                style={styles.secondaryButton}
+                onClick={() => setActiveModal(null)}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                style={metaBusinessValue ? styles.primaryButton : styles.disabledButton}
+                disabled={!metaBusinessValue}
+                onClick={() => {
+                  const selectedOption = metaBusinessOptions.find(
+                    (option) => option.value === metaBusinessValue
+                  );
+
+                  assetSelectionFetcher.submit(
+                    {
+                      _action: "save_asset_selection",
+                      platform: "meta",
+                      assetType: "Meta Business Portfolio",
+                      assetValue: metaBusinessValue,
+                      assetLabel: selectedOption?.label || metaBusinessValue,
+                    },
+                    { method: "post" }
+                  );
+
+                  setActiveModal(null);
+                }}
+              >
+                Save Business Portfolio
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
 
       {activeModal === "remarketing" && (
         <Modal title="Google Ads Remarketing Configuration" onClose={() => setActiveModal(null)}>
@@ -2019,7 +2774,11 @@ export default function ConfigurationPage() {
 
             {Boolean(googleAdsConversionActions?.length) && (
               <div style={{ display: "grid", gap: "8px" }}>
-                {googleAdsConversionActions.map((conversion) => (
+                {googleAdsConversionActions.map(
+                  (
+                    conversion:
+                      (typeof googleAdsConversionActions)[number]
+                  ) => (
                   <div
                     key={conversion.id}
                     style={{
@@ -2347,7 +3106,7 @@ function Modal({
   );
 }
 
-const styles = {
+const styles: Record<string, CSSProperties> = {
   page: { padding: 24, maxWidth: 1280, margin: "0 auto" },
   hero: {
     padding: 24,
@@ -2515,6 +3274,42 @@ const styles = {
   assetFieldBlock: {
     display: "grid",
     gap: 8,
+  },
+  fieldWithAction: {
+    display: "grid",
+    gridTemplateColumns: "minmax(0, 1fr) auto",
+    alignItems: "end",
+    gap: 10,
+    width: "100%",
+  },
+  connectedBadge: {
+    display: "inline-block",
+    width: "fit-content",
+    padding: "4px 10px",
+    borderRadius: 999,
+    background: "#dcfce7",
+    color: "#166534",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  pendingBadge: {
+    display: "inline-block",
+    width: "fit-content",
+    padding: "4px 10px",
+    borderRadius: 999,
+    background: "#fef3c7",
+    color: "#92400e",
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  checkboxGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+    gap: 10,
+    padding: 12,
+    border: "1px solid #e5e7eb",
+    borderRadius: 10,
+    background: "#f9fafb",
   },
   inlineActionButton: {
     width: "fit-content",

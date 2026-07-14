@@ -1,4 +1,4 @@
-import { Form, redirect, useLoaderData, useLocation } from "react-router";
+import { Link, Form, redirect, useLoaderData, useLocation } from "react-router";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
@@ -69,7 +69,8 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function ConnectionsPage() {
-  const { shop, navQuery, connections, customerEnrichment, testModeSettings } = useLoaderData<typeof loader>();
+  const { shop, connections, customerEnrichment, testModeSettings } =
+    useLoaderData<typeof loader>();
   const testModeEnabled = Boolean(testModeSettings?.enabled);
   const location = useLocation();
   const withNav = (path: string) => {
@@ -77,9 +78,6 @@ export default function ConnectionsPage() {
     if (!params.get("shop")) params.set("shop", shop);
     return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
   };
-  const withShop = (path: string) =>
-    `${path}${path.includes("?") ? "&" : "?"}shop=${encodeURIComponent(shop)}`;
-
   const platforms = [
     {
       id: "google",
@@ -182,17 +180,17 @@ export default function ConnectionsPage() {
       </p>
 
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 }}>
-        <a href={withNav("/app/settings")} style={styles.secondaryLink}>
+        <Link to={withNav("/app/settings")} style={styles.secondaryLink}>
           Configuration
-        </a>
+        </Link>
 
-        <a href={withNav("/app/delivery-logs")} style={styles.secondaryLink}>
+        <Link to={withNav("/app/delivery-logs")} style={styles.secondaryLink}>
           Event Delivery Logs
-        </a>
+        </Link>
 
-        <a href={withNav("/app/help")} style={styles.secondaryLink}>
+        <Link to={withNav("/app/help")} style={styles.secondaryLink}>
           Help / Documentation
-        </a>
+        </Link>
       </div>
 
       <div
@@ -346,6 +344,11 @@ export default function ConnectionsPage() {
 }
 
 const styles = {
+  title: {
+    margin: 0,
+    color: "#111827",
+    fontWeight: 800,
+  },
   primaryLink: {
     display: "inline-block",
     padding: "8px 16px",

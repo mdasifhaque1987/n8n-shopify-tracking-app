@@ -51,6 +51,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
     itemIdFormat: "shopify_country_product_variant",
   };
 
+  let metaConfig: Record<string, unknown> = {
+    enabled: false,
+    datasetId: null,
+    pixelId: null,
+    clientSideEnabled: false,
+    serverSideEnabled: false,
+    selectedEvents: [],
+    testEventCode: "",
+    contentIdFormat: "shopify_country_product_variant",
+    capiAccessTokenConfigured: false,
+  };
+
   if (settings?.workspaceId) {
     const ga4DeliverySettings = await getGa4DeliverySettings(settings.workspaceId);
     const testModeSettings = await getTestModeSettings(settings.workspaceId);
@@ -67,6 +79,53 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
 
     const selectedAssets = await getAssetSelections(settings.workspaceId);
+
+    const metaDatasetId = String(
+      selectedAssets["meta:Meta Dataset / Pixel"] || ""
+    ).trim();
+
+    const metaSelectedEventsRaw = String(
+      selectedAssets["meta:Meta Selected Events"] || "none"
+    ).trim();
+
+    const metaSelectedEvents =
+      metaSelectedEventsRaw === "none"
+        ? []
+        : metaSelectedEventsRaw
+            .split(",")
+            .map((eventName) => eventName.trim())
+            .filter(Boolean);
+
+    const metaClientSideEnabled =
+      String(selectedAssets["meta:Meta Client Side Enabled"] || "false") === "true";
+
+    const metaServerSideEnabled =
+      String(selectedAssets["meta:Meta Server Side Enabled"] || "false") === "true";
+
+    const metaTestEventCode = String(
+      selectedAssets["meta:Meta Test Event Code"] || ""
+    ).trim();
+
+    const metaContentIdFormat = String(
+      selectedAssets["meta:Meta Content ID Format"] ||
+        "shopify_country_product_variant"
+    ).trim();
+
+    const metaCapiAccessTokenConfigured = Boolean(
+      String(selectedAssets["meta:Meta CAPI Access Token"] || "").trim()
+    );
+
+    metaConfig = {
+      enabled: Boolean(metaDatasetId && (metaClientSideEnabled || metaServerSideEnabled)),
+      datasetId: metaDatasetId || null,
+      pixelId: metaDatasetId || null,
+      clientSideEnabled: metaClientSideEnabled,
+      serverSideEnabled: Boolean(metaServerSideEnabled && metaCapiAccessTokenConfigured),
+      selectedEvents: metaSelectedEvents,
+      testEventCode: metaTestEventCode === "none" ? "" : metaTestEventCode,
+      contentIdFormat: metaContentIdFormat,
+      capiAccessTokenConfigured: metaCapiAccessTokenConfigured,
+    };
 
     const selectedGoogleAdsCustomerId =
       String(
@@ -173,6 +232,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         remarketing: googleAdsRemarketing,
         missingLabels: googleAdsMissingLabels,
       },
+      meta: metaConfig,
       pixels: {
         ga4Id: ga4MeasurementId,
         googleAdsId: settings?.googleAdsId || null,

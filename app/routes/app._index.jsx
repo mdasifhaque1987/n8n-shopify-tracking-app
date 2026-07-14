@@ -1,4 +1,4 @@
-import { useLoaderData, useLocation } from "react-router";
+import { Link, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
 import { getTestModeSettings } from "../services/test-mode.server";
@@ -27,15 +27,16 @@ export async function loader({ request }) {
 }
 
 export default function HomePage() {
-  const { shop, navQuery, testModeSettings } = useLoaderData();
+  const { navQuery, testModeSettings } = useLoaderData();
   const testModeEnabled = Boolean(testModeSettings?.enabled);
-  const location = useLocation();
-  const withNav = (path) => {
-    const params = new URLSearchParams(location.search);
-    if (!params.get("shop")) params.set("shop", shop);
-    return `${path}${path.includes("?") ? "&" : "?"}${params.toString()}`;
+
+  const appPath = (path) => {
+    if (!navQuery) {
+      return path;
+    }
+
+    return `${path}${path.includes("?") ? "&" : "?"}${navQuery}`;
   };
-  const withShop = (path) => `${path}${path.includes("?") ? "&" : "?"}shop=${encodeURIComponent(shop)}`;
 
   const cards = [
     {
@@ -136,10 +137,10 @@ export default function HomePage() {
         </p>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 20 }}>
-          <a href={withNav("/app/settings")} style={styles.primaryButton}>Open Configuration</a>
-          <a href={withNav("/app/connections")} style={styles.darkButton}>Platform Connections</a>
-          <a href={withNav("/app/delivery-logs")} style={styles.secondaryButton}>Event Delivery Logs</a>
-          <a href={withNav("/app/help")} style={styles.secondaryButton}>Help / Documentation</a>
+          <Link to={appPath("/app/settings")} style={styles.primaryButton}>Open Configuration</Link>
+          <Link to={appPath("/app/connections")} style={styles.darkButton}>Platform Connections</Link>
+          <Link to={appPath("/app/delivery-logs")} style={styles.secondaryButton}>Event Delivery Logs</Link>
+          <Link to={appPath("/app/help")} style={styles.secondaryButton}>Help / Documentation</Link>
         </div>
       </section>
 

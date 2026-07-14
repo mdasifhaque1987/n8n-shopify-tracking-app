@@ -1,13 +1,21 @@
-import { Outlet, useLoaderData, useRouteError } from "react-router";
-import { boundary } from "@shopify/shopify-app-react-router/server";
+/* global process */
+import {
+  Outlet,
+  useLoaderData,
+  useRouteError,
+} from "react-router";
+
 import { AppProvider } from "@shopify/shopify-app-react-router/react";
+import { boundary } from "@shopify/shopify-app-react-router/server";
+
 import { authenticate } from "../shopify.server";
 
 export const loader = async ({ request }) => {
   await authenticate.admin(request);
 
-  // eslint-disable-next-line no-undef
-  return { apiKey: process.env.SHOPIFY_API_KEY || "" };
+  return {
+    apiKey: process.env.SHOPIFY_API_KEY || "",
+  };
 };
 
 export default function App() {
@@ -16,16 +24,30 @@ export default function App() {
   return (
     <AppProvider embedded apiKey={apiKey}>
       <s-app-nav>
-        <s-link href="/app">Home</s-link>
-        <s-link href="/app/additional">Additional page</s-link>
-        <s-link href="/app/settings">Settings</s-link>
+        {/* Hidden home target used by the DH Conversions app name */}
+        <s-link href="/app" rel="home">
+          Home
+        </s-link>
+
+        {/* Visible Home navigation item */}
+        <s-link href="/app/home">
+          Home
+        </s-link>
+
+        <s-link href="/app/settings">
+          Configuration
+        </s-link>
+
+        <s-link href="/app/connections">
+          Connections
+        </s-link>
       </s-app-nav>
+
       <Outlet />
     </AppProvider>
   );
 }
 
-// Shopify needs React Router to catch some thrown responses, so that their headers are included in the response.
 export function ErrorBoundary() {
   return boundary.error(useRouteError());
 }
