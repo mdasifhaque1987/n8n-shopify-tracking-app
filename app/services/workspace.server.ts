@@ -1,239 +1,65 @@
-// Workspace service for managing workspaces and memberships
 import db from "../db.server";
-import type { Workspace, WorkspaceMember, MemberRole } from "@prisma/client";
 
-export interface CreateWorkspaceData {
-  name: string;
-  slug: string;
-  ownerId: string;
+function cleanShop(shopInput: string) {
+  return shopInput
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/.*$/, "");
 }
 
-/**
- * Create a new workspace
- */
-export async function createWorkspace(data: CreateWorkspaceData): Promise<Workspace> {
-  // Check if slug is already taken
-  const existing = await db.workspace.findUnique({
-    where: { slug: data.slug },
-  });
+function shopSlug(shop: string) {
+  return `shop-${shop.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "")}`;
+}
 
-  if (existing) {
-    throw new Error("Workspace with this slug already exists");
+export async function getOrCreateShopWorkspace(shopInput: string) {
+  const shop = cleanShop(shopInput);
+
+  if (!shop) {
+    throw new Error("Shop is required to create workspace");
   }
 
-  // Create workspace
-  const workspace = await db.workspace.create({
-    data: {
-      name: data.name,
-      slug: data.slug,
-      ownerId: data.ownerId,
+  const slug = shopSlug(shop);
+  const ownerEmail = `${slug}@workspace.local`;
+
+  const owner = await db.user.upsert({
+    where: { email: ownerEmail },
+    update: {},
+    create: {
+      email: ownerEmail,
+      name: shop,
+      emailVerified: true,
     },
   });
 
-  // Add owner as a member
-  await db.workspaceMember.create({
-    data: {
+  const workspace = await db.workspace.upsert({
+    where: { slug },
+    update: {
+      name: shop,
+    },
+    create: {
+      name: shop,
+      slug,
+      ownerId: owner.id,
+    },
+  });
+
+  await db.workspaceMember.upsert({
+    where: {
+      workspaceId_userId: {
+        workspaceId: workspace.id,
+        userId: owner.id,
+      },
+    },
+    update: {
+      role: "OWNER",
+    },
+    create: {
       workspaceId: workspace.id,
-      userId: data.ownerId,
+      userId: owner.id,
       role: "OWNER",
     },
   });
 
   return workspace;
-}
-
-/**
- * Get workspace by ID
- */
-export async function getWorkspaceById(id: string): Promise<Workspace | null> {
-  return db.workspace.findUnique({
-    where: { id },
-    include: {
-      owner: true,
-      members: {
-        include: {
-          user: true,
-        },
-      },
-    },
-  });
-}
-
-/**
- * Get workspace by slug
- */
-export async function getWorkspaceBySlug(slug: string): Promise<Workspace | null> {
-  return db.workspace.findUnique({
-    where: { slug },
-    include: {
-      owner: true,
-      members: {
-        include: {
-          user: true,
-        },
-      },
-    },
-  });
-}
-
-/**
- * Get user's workspaces
- */
-export async function getUserWorkspaces(userId: string): Promise<Workspace[]> {
-  const memberships = await db.workspaceMember.findMany({
-    where: { userId },
-    include: {
-      workspace: {
-        include: {
-          owner: true,
-        },
-      },
-    },
-  });
-
-  return memberships.map((m: { workspace: Workspace }) => m.workspace);
-}
-
-/**
- * Add member to workspace
- */
-export async function addWorkspaceMember(
-  workspaceId: string,
-  userId: string,
-  role: MemberRole = "MEMBER"
-): Promise<WorkspaceMember> {
-  // Check if already a member
-  const existing = await db.workspaceMember.findUnique({
-    where: {
-      workspaceId_userId: {
-        workspaceId,
-        userId,
-      },
-    },
-  });
-
-  if (existing) {
-    throw new Error("User is already a member of this workspace");
-  }
-
-  return db.workspaceMember.create({
-    data: {
-      workspaceId,
-      userId,
-      role,
-    },
-  });
-}
-
-/**
- * Update member role
- */
-export async function updateMemberRole(
-  workspaceId: string,
-  userId: string,
-  role: MemberRole
-): Promise<WorkspaceMember> {
-  return db.workspaceMember.update({
-    where: {
-      workspaceId_userId: {
-        workspaceId,
-        userId,
-      },
-    },
-    data: { role },
-  });
-}
-
-/**
- * Remove member from workspace
- */
-export async function removeMember(workspaceId: string, userId: string): Promise<void> {
-  await db.workspaceMember.delete({
-    where: {
-      workspaceId_userId: {
-        workspaceId,
-        userId,
-      },
-    },
-  });
-}
-
-/**
- * Check if user has access to workspace
- */
-export async function hasWorkspaceAccess(
-  workspaceId: string,
-  userId: string
-): Promise<boolean> {
-  const member = await db.workspaceMember.findUnique({
-    where: {
-      workspaceId_userId: {
-        workspaceId,
-        userId,
-      },
-    },
-  });
-
-  return !!member;
-}
-
-/**
- * Check if user has specific role in workspace
- */
-export async function hasWorkspaceRole(
-  workspaceId: string,
-  userId: string,
-  requiredRole: MemberRole
-): Promise<boolean> {
-  const member = await db.workspaceMember.findUnique({
-    where: {
-      workspaceId_userId: {
-        workspaceId,
-        userId,
-      },
-    },
-  });
-
-  if (!member) return false;
-
-  // Role hierarchy: OWNER > ADMIN > MEMBER > VIEWER
-  const roleHierarchy: Record<MemberRole, number> = {
-    OWNER: 4,
-    ADMIN: 3,
-    MEMBER: 2,
-    VIEWER: 1,
-  };
-
-  const memberRoleLevel = roleHierarchy[member.role as MemberRole];
-  const requiredRoleLevel = roleHierarchy[requiredRole];
-  
-  return memberRoleLevel >= requiredRoleLevel;
-}
-
-/**
- * Update workspace
- * Note: Only name and slug can be updated for security
- */
-export async function updateWorkspace(
-  id: string,
-  data: { name?: string; slug?: string }
-): Promise<Workspace> {
-  // Only allow updating safe fields
-  const safeData: { name?: string; slug?: string } = {};
-  if (data.name !== undefined) safeData.name = data.name;
-  if (data.slug !== undefined) safeData.slug = data.slug;
-
-  return db.workspace.update({
-    where: { id },
-    data: safeData,
-  });
-}
-
-/**
- * Delete workspace
- */
-export async function deleteWorkspace(id: string): Promise<void> {
-  await db.workspace.delete({
-    where: { id },
-  });
 }
