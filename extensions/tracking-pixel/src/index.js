@@ -5,6 +5,7 @@ const APP_PROXY_TRACK_URL = "/apps/dh-track";
 const TRACK_URL = "https://tracking.datahatches.com/api/events/track";
 const GA4_COLLECT_URL = "https://www.google-analytics.com/g/collect";
 const GOOGLE_ADS_CONVERSION_URL = "https://www.googleadservices.com/pagead/conversion";
+const META_PIXEL_URL = "https://www.facebook.com/tr/";
 
 const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
 const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
@@ -14,6 +15,7 @@ const DH_PIXEL_VERSION = "2026-07-05-app-proxy-fallback-v5";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
+let metaSemanticMemory = {};
 
 async function getConfig(shop) {
   if (cachedConfig) return cachedConfig;
@@ -144,11 +146,49 @@ function getAppProxyTrackUrls(payload) {
   return [APP_PROXY_TRACK_URL];
 }
 
+function isMetaCheckoutFallbackEvent(payload) {
+  return (
+    payload &&
+    (
+      payload.meta_event === "AddPaymentInfo" ||
+      payload.meta_event === "AddShippingInfo"
+    )
+  );
+}
+
+async function sendToServerTextFallback(payload) {
+  try {
+    await fetch(TRACK_URL, {
+      method: "POST",
+      mode: "no-cors",
+      keepalive: true,
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8",
+      },
+      body: JSON.stringify({
+        ...payload,
+        transport: "text_plain_checkout_fallback",
+      }),
+    });
+
+    DH_PIXEL_DEBUG && console.log(
+      "[DH Tracking Pixel] checkout fallback server send attempted",
+      payload.meta_event,
+      payload.event_id
+    );
+  } catch (e) {
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] checkout fallback send error", e);
+  }
+}
+
 async function sendToServer(payload) {
   try {
     const body = JSON.stringify(payload);
     const appProxyUrls = getAppProxyTrackUrls(payload);
-    const endpoints = appProxyUrls.concat(TRACK_URL).filter(Boolean);
+
+    // Send direct server endpoint first for checkout step reliability.
+    // App proxy is kept only as fallback.
+    const endpoints = [TRACK_URL].concat(appProxyUrls).filter(Boolean);
     let lastError = null;
 
     for (const endpoint of endpoints) {
@@ -162,7 +202,7 @@ async function sendToServer(payload) {
 
         if (response.ok || response.type === "opaque") {
           DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] server sent", endpoint);
-          return;
+          return true;
         }
 
         lastError = new Error(`HTTP ${response.status} from ${endpoint}`);
@@ -174,8 +214,11 @@ async function sendToServer(payload) {
     if (lastError) {
       DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] server send error", lastError);
     }
+
+    return false;
   } catch (e) {
     DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] server send error", e);
+    return false;
   }
 }
 
@@ -215,7 +258,7 @@ function mapEvent(name) {
     },
     checkout_shipping_info_submitted: {
       ga4: "add_shipping_info",
-      meta: "InitiateCheckout",
+      meta: "AddShippingInfo",
     },
     payment_info_submitted: {
       ga4: "add_payment_info",
@@ -249,6 +292,7 @@ function safeString(value) {
 
 const ATTRIBUTION_STORAGE_KEY = "dh_tracking_attribution";
 const CUSTOMER_STORAGE_KEY = "dh_tracking_customer";
+const DH_META_SEMANTIC_DEDUP_KEY = "dh_meta_semantic_dedup_v2";
 
 const CLICK_ID_KEYS = [
   "gclid",
@@ -277,7 +321,9 @@ async function readBrowserLocalStorage(browser, key) {
     ) {
       return await browser.localStorage.getItem(key);
     }
-  } catch (e) {}
+  } catch (e) {
+    // Ignore unavailable Shopify sandbox storage APIs.
+  }
 
   return undefined;
 }
@@ -291,7 +337,9 @@ async function readBrowserCookie(browser, key) {
     ) {
       return await browser.cookie.get(key);
     }
-  } catch (e) {}
+  } catch (e) {
+    // Ignore unavailable Shopify sandbox storage APIs.
+  }
 
   return undefined;
 }
@@ -305,7 +353,9 @@ async function writeBrowserLocalStorage(browser, key, value) {
     ) {
       await browser.localStorage.setItem(key, value);
     }
-  } catch (e) {}
+  } catch (e) {
+    // Ignore unavailable Shopify sandbox storage APIs.
+  }
 }
 
 async function writeBrowserCookie(browser, key, value) {
@@ -317,7 +367,9 @@ async function writeBrowserCookie(browser, key, value) {
     ) {
       await browser.cookie.set(key, value);
     }
-  } catch (e) {}
+  } catch (e) {
+    // Ignore unavailable Shopify sandbox storage APIs.
+  }
 }
 
 function parseJson(value) {
@@ -414,6 +466,20 @@ async function getAttribution(event, browser) {
     for (const key of Object.keys(urlClickIds)) {
       await writeBrowserCookie(browser, "dh_" + key, urlClickIds[key]);
     }
+  }
+
+  const fbp = await readBrowserCookie(browser, "_fbp");
+  const existingFbc = await readBrowserCookie(browser, "_fbc");
+
+  if (fbp) {
+    attribution.fbp = fbp;
+  }
+
+  if (existingFbc) {
+    attribution.fbc = existingFbc;
+  } else if (attribution.fbclid) {
+    attribution.fbc = "fb.1." + Math.floor(Date.now() / 1000) + "." + attribution.fbclid;
+    await writeBrowserCookie(browser, "_fbc", attribution.fbc);
   }
 
   return attribution;
@@ -749,6 +815,9 @@ function getItems(data) {
       return {
         item_id: safeString(variant.id || lineProduct.id || line.id),
         item_name: lineProduct.title || variant.title || line.title,
+        product_id: safeString(lineProduct.id),
+        variant_id: safeString(variant.id),
+        sku: safeString(variant.sku || line.sku),
         price: cleanMoney(line.finalLinePrice?.amount || line.cost?.totalAmount?.amount || variant.price?.amount),
         quantity: cleanMoney(line.quantity) || 1,
       };
@@ -764,6 +833,9 @@ function getItems(data) {
     {
       item_id: safeString(itemId),
       item_name: itemName,
+      product_id: safeString(product.id),
+      variant_id: safeString(productVariant.id || cartLine.merchandise?.id),
+      sku: safeString(productVariant.sku || cartLine.merchandise?.sku),
       price: cleanMoney(productVariant.price?.amount || cartLine.cost?.totalAmount?.amount),
       quantity: cleanMoney(cartLine.quantity) || 1,
     },
@@ -800,6 +872,10 @@ async function buildPayload(event, config, browser) {
   const attribution = await getAttribution(event, browser);
   const customer = await getCustomerForEvent(data, browser);
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
+  const metaContentIdFormat =
+    config?.meta?.contentIdFormat || "shopify_country_product_variant";
+  const metaContents = buildMetaContents(items, metaContentIdFormat);
+  const metaContentIds = metaContents.map((item) => item.id).filter(Boolean);
   const gaIdentity = await getGaIdentity(browser, event);
 
   DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA identity", {
@@ -828,18 +904,26 @@ async function buildPayload(event, config, browser) {
     value,
     currency,
     transaction_id: transactionId,
-    content_ids: itemId ? [String(itemId)] : undefined,
+    content_ids: metaContentIds.length ? metaContentIds : itemId ? [String(itemId)] : undefined,
     item_name: product.title || productVariant.title || undefined,
     items,
     attribution,
     customer,
     ecommerce,
+    meta: {
+      event_name: mapped.meta,
+      content_type: metaContents.length ? "product" : undefined,
+      content_ids: metaContentIds,
+      contents: metaContents,
+    },
     config,
     raw: {
       client_id: gaIdentity.clientId,
       session_id: gaIdentity.sessionId,
       shopify_client_id: gaIdentity.shopifyClientId,
       pixel_version: DH_PIXEL_VERSION,
+      checkout_token: checkout.token || undefined,
+      checkout_id: checkout.id || undefined,
     },
   };
 }
@@ -1271,6 +1355,281 @@ function sendToGa4(payload, config) {
   }
 }
 
+function getMetaConfig(config) {
+  return config && config.meta ? config.meta : {};
+}
+
+function isMetaEventSelected(metaConfig, metaEventName) {
+  var events = Array.isArray(metaConfig.selectedEvents)
+    ? metaConfig.selectedEvents
+    : [];
+
+  return events.indexOf(metaEventName) !== -1;
+}
+
+function cleanShopifyGid(value) {
+  value = firstValue(value);
+
+  if (!value) return "";
+
+  value = String(value);
+
+  if (value.indexOf("gid://") === 0) {
+    return value.split("/").pop();
+  }
+
+  return value;
+}
+
+function buildMetaContentId(item, itemIdFormat) {
+  item = item || {};
+
+  var rawProductId =
+    item.product_id ||
+    item.item_group_id ||
+    item.productId ||
+    item.id ||
+    item.item_id ||
+    "";
+
+  var rawVariantId =
+    item.variant_id ||
+    item.variantId ||
+    item.sku ||
+    item.item_id ||
+    "";
+
+  var productId = cleanShopifyGid(rawProductId);
+  var variantId = cleanShopifyGid(rawVariantId);
+
+  if (itemIdFormat === "product_id") {
+    return String(productId || item.item_id || "").trim();
+  }
+
+  if (itemIdFormat === "variant_id") {
+    return String(variantId || item.item_id || "").trim();
+  }
+
+  if (itemIdFormat === "sku") {
+    return String(item.sku || variantId || item.item_id || "").trim();
+  }
+
+  if (itemIdFormat === "product_variant") {
+    if (productId && variantId) return productId + "_" + variantId;
+    return String(item.item_id || productId || variantId || "").trim();
+  }
+
+  if (itemIdFormat === "shopify_country_product_variant") {
+    var country = String(payloadCountryFallback(item) || "US").toUpperCase();
+
+    if (productId && variantId) {
+      return "shopify_" + country + "_" + productId + "_" + variantId;
+    }
+
+    return String(item.item_id || productId || variantId || "").trim();
+  }
+
+  return String(item.item_id || productId || variantId || "").trim();
+}
+
+function buildMetaContents(items, itemIdFormat) {
+  if (!Array.isArray(items)) return [];
+
+  return items
+    .map(function (item) {
+      var id = buildMetaContentId(item, itemIdFormat);
+
+      if (!id) return null;
+
+      return {
+        id: id,
+        quantity: Number(item.quantity || 1),
+        item_price:
+          item.price !== undefined && item.price !== null
+            ? Number(item.price)
+            : undefined,
+      };
+    })
+    .filter(Boolean);
+}
+
+function buildMetaPixelUrl(payload, metaConfig) {
+  var eventName = payload.meta_event;
+  var meta = payload.meta || {};
+  var params = new URLSearchParams();
+
+  params.set("id", metaConfig.pixelId || metaConfig.datasetId);
+  params.set("ev", eventName);
+  params.set("dl", payload.page_location || "");
+  params.set("rl", payload.page_referrer || "");
+  params.set("if", "false");
+  params.set("ts", String(Math.floor(Date.now() / 1000)));
+  params.set("eid", payload.event_id);
+
+  if (payload.attribution && payload.attribution.fbp) {
+    params.set("fbp", payload.attribution.fbp);
+  }
+
+  if (payload.attribution && payload.attribution.fbc) {
+    params.set("fbc", payload.attribution.fbc);
+  }
+
+  if (payload.value !== undefined && payload.value !== null) {
+    params.set("cd[value]", String(payload.value));
+  }
+
+  if (payload.currency) {
+    params.set("cd[currency]", String(payload.currency));
+  }
+
+  if (meta.content_type) {
+    params.set("cd[content_type]", meta.content_type);
+  }
+
+  if (Array.isArray(meta.content_ids) && meta.content_ids.length) {
+    params.set("cd[content_ids]", JSON.stringify(meta.content_ids));
+  }
+
+  if (Array.isArray(meta.contents) && meta.contents.length) {
+    params.set("cd[contents]", JSON.stringify(meta.contents));
+    params.set(
+      "cd[num_items]",
+      String(
+        meta.contents.reduce(function (sum, item) {
+          return sum + Number(item.quantity || 1);
+        }, 0)
+      )
+    );
+  }
+
+  if (payload.transaction_id) {
+    params.set("cd[order_id]", String(payload.transaction_id));
+  }
+
+  return META_PIXEL_URL + "?" + params.toString();
+}
+
+function getMetaSemanticDedupeKey(payload) {
+  var eventName = payload.meta_event;
+
+  if (
+    eventName !== "InitiateCheckout" &&
+    eventName !== "AddPaymentInfo" &&
+    eventName !== "AddShippingInfo"
+  ) {
+    return "";
+  }
+
+  var raw = payload.raw || {};
+  var ecommerce = payload.ecommerce || {};
+
+  var checkoutKey =
+    raw.checkout_token ||
+    raw.checkout_id ||
+    payload.transaction_id ||
+    ecommerce.transaction_id ||
+    payload.session_id ||
+    payload.shopify_client_id ||
+    payload.page_location ||
+    "checkout";
+
+  return [
+    payload.shop || "shop",
+    eventName,
+    String(checkoutKey).split("?")[0].split("#")[0],
+  ].join("|");
+}
+
+// Reserved for optional semantic deduplication.
+// eslint-disable-next-line no-unused-vars
+async function shouldSkipMetaSemanticEvent(payload, browser) {
+  try {
+    var key = getMetaSemanticDedupeKey(payload);
+
+    if (!key) return false;
+
+    var now = Date.now();
+    var ttlMs = 2 * 60 * 60 * 1000;
+
+    Object.keys(metaSemanticMemory).forEach(function (storedKey) {
+      if (!metaSemanticMemory[storedKey] || now - Number(metaSemanticMemory[storedKey]) > ttlMs) {
+        delete metaSemanticMemory[storedKey];
+      }
+    });
+
+    // Immediate in-memory lock prevents two fast checkout events from both passing.
+    if (metaSemanticMemory[key]) {
+      return true;
+    }
+
+    metaSemanticMemory[key] = now;
+
+    var raw = await readBrowserLocalStorage(browser, DH_META_SEMANTIC_DEDUP_KEY);
+    var store = parseJson(raw);
+    var changed = false;
+
+    Object.keys(store).forEach(function (storedKey) {
+      if (!store[storedKey] || now - Number(store[storedKey]) > ttlMs) {
+        delete store[storedKey];
+        changed = true;
+      }
+    });
+
+    if (store[key]) {
+      return true;
+    }
+
+    store[key] = now;
+    changed = true;
+
+    if (changed) {
+      await writeBrowserLocalStorage(
+        browser,
+        DH_META_SEMANTIC_DEDUP_KEY,
+        JSON.stringify(store)
+      );
+    }
+
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+function sendToMetaPixel(payload, config) {
+  try {
+    var metaConfig = getMetaConfig(config);
+    var pixelId = metaConfig.pixelId || metaConfig.datasetId;
+
+    if (payload.meta && payload.meta.skip === true) {
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel skipped", payload.meta.skip_reason);
+      return;
+    }
+
+    if (!metaConfig.enabled || !metaConfig.clientSideEnabled || !pixelId) {
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel skipped - not enabled");
+      return;
+    }
+
+    if (!isMetaEventSelected(metaConfig, payload.meta_event)) {
+      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel skipped - event not selected", payload.meta_event);
+      return;
+    }
+
+    var url = buildMetaPixelUrl(payload, metaConfig);
+
+    fetch(url, {
+      method: "GET",
+      mode: "no-cors",
+      keepalive: true,
+    });
+
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel sent", payload.meta_event, pixelId, payload.event_id);
+  } catch (e) {
+    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel send error", e);
+  }
+}
+
 register(({ analytics, browser }) => {
   DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] loaded", DH_PIXEL_VERSION, "with GA4 client sender");
 
@@ -1301,11 +1660,25 @@ register(({ analytics, browser }) => {
           testMode: config ? config.testMode : null,
         });
 
-        sendToServer(payload);
+        const serverSendPromise = sendToServer(payload);
+
+        sendToMetaPixel(payload, config);
         sendGa4ClientSeed(payload, config);
         sendToGa4(payload, config);
         sendToGoogleAds(payload, config);
         sendGoogleAdsRemarketing(payload, config);
+
+        const serverSent = await serverSendPromise;
+
+        if (!serverSent && isMetaCheckoutFallbackEvent(payload)) {
+          DH_PIXEL_DEBUG && console.log(
+            "[DH Tracking Pixel] primary checkout send failed; trying text fallback",
+            payload.meta_event,
+            payload.event_id
+          );
+
+          await sendToServerTextFallback(payload);
+        }
       } catch (e) {
         DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel Error]", eventName, e);
       }

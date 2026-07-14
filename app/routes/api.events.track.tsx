@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { applyEventSecurityPrecheck } from "../services/security/event-security.server";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import db from "../db.server";
@@ -7,6 +8,7 @@ import { dispatchPurchaseToGoogleAds } from "../services/dispatchers/google-ads.
 import { enrichShopifyOrderCustomer } from "../services/shopify-order-enrichment.server";
 import { isTestModeEnabled } from "../services/test-mode.server";
 import { dispatchToGA4 } from "../services/dispatchers/ga4.dispatcher";
+import { dispatchToMeta } from "../services/dispatchers/meta.dispatcher";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -28,6 +30,171 @@ function getShopFromRequest(request: Request, payload: any): string | null {
   );
 }
 
+async function parseTrackingPayload(request: Request) {
+  const rawBody = await request.text();
+
+  if (!rawBody || !rawBody.trim()) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(rawBody);
+  } catch (error) {
+    throw new Error("Invalid tracking payload JSON.");
+  }
+}
+
+
+function mapGa4EventToMeta(eventName: string) {
+  const map: Record<string, string> = {
+    page_view: "PageView",
+    view_item: "ViewContent",
+    view_item_list: "ViewContent",
+    view_cart: "ViewContent",
+    add_to_cart: "AddToCart",
+    begin_checkout: "InitiateCheckout",
+    add_payment_info: "AddPaymentInfo",
+    add_shipping_info: "AddShippingInfo",
+    add_contact_info: "Lead",
+    purchase: "Purchase",
+    search: "Search",
+    generate_lead: "Lead",
+    sign_up: "CompleteRegistration",
+  };
+
+  return map[eventName] || eventName;
+}
+
+
+
+type DeliveryStatus =
+  | "received"
+  | "success"
+  | "sent"
+  | "failed"
+  | "skipped";
+
+const validDeliveryStatuses = new Set<DeliveryStatus>([
+  "received",
+  "success",
+  "sent",
+  "failed",
+  "skipped",
+]);
+
+function normalizeDeliveryStatus(value: unknown): DeliveryStatus {
+  const status = String(value || "failed") as DeliveryStatus;
+
+  return validDeliveryStatuses.has(status)
+    ? status
+    : "failed";
+}
+
+const recentMetaRouteSends = new Map<string, number>();
+
+function claimMetaRouteSend(
+  shop: string,
+  eventName: string,
+  eventId: string,
+  metaEventName: string
+) {
+  const now = Date.now();
+  const ttlMs = 2 * 60 * 1000;
+
+  for (const [key, timestamp] of recentMetaRouteSends.entries()) {
+    if (now - timestamp > ttlMs) {
+      recentMetaRouteSends.delete(key);
+    }
+  }
+
+  const key = `${shop}:${eventName}:${eventId}:${metaEventName}`;
+  const previous = recentMetaRouteSends.get(key);
+
+  if (previous && now - previous < ttlMs) {
+    return false;
+  }
+
+  recentMetaRouteSends.set(key, now);
+  return true;
+}
+
+function resolveMetaEventName(eventName: string, payloadMetaEvent?: string | null) {
+  const mappedEvent = mapGa4EventToMeta(eventName);
+
+  // For Shopify checkout step events, always trust our server-side eventName mapping.
+  // This prevents stale browser payloads from sending add_shipping_info as InitiateCheckout.
+  if (
+    eventName === "begin_checkout" ||
+    eventName === "add_shipping_info" ||
+    eventName === "add_payment_info" ||
+    eventName === "purchase"
+  ) {
+    return mappedEvent;
+  }
+
+  return payloadMetaEvent || mappedEvent;
+}
+
+
+function getClientIp(request: Request) {
+  const forwardedFor = request.headers.get("x-forwarded-for");
+
+  if (forwardedFor) {
+    return forwardedFor.split(",")[0]?.trim() || null;
+  }
+
+  return (
+    request.headers.get("cf-connecting-ip") ||
+    request.headers.get("x-real-ip") ||
+    null
+  );
+}
+
+async function findRecentMetaServerDelivery(input: {
+  workspaceId: string;
+  shop?: string | null;
+  eventId: string;
+  eventName: string;
+}) {
+  const recentWindow = new Date(Date.now() - 60 * 60 * 1000);
+
+  return db.eventDeliveryLog.findFirst({
+    where: {
+      workspaceId: input.workspaceId,
+      shop: input.shop || null,
+      eventId: input.eventId,
+      eventName: input.eventName,
+      platform: "meta",
+      deliveryType: "server",
+      status: {
+        in: ["sent", "success"],
+      },
+      createdAt: {
+        gte: recentWindow,
+      },
+    },
+    select: {
+      id: true,
+      createdAt: true,
+      status: true,
+    },
+    orderBy: {
+      createdAt: "desc",
+    },
+  });
+}
+
+function getPayloadMetaSelectedEvents(payload: any): string[] {
+  const selectedEvents = payload?.config?.meta?.selectedEvents;
+
+  if (!Array.isArray(selectedEvents)) {
+    return [];
+  }
+
+  return selectedEvents
+    .map((eventName) => String(eventName || "").trim())
+    .filter(Boolean);
+}
 
 function parseCsvSetting(value?: string | null): string[] {
   return String(value || "")
@@ -59,7 +226,7 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   try {
-    const payload = await request.json();
+    const payload = await parseTrackingPayload(request);
     const securityPrecheck = await applyEventSecurityPrecheck(request, payload);
 
     if (!securityPrecheck.ok) {
@@ -77,6 +244,8 @@ export async function action({ request }: ActionFunctionArgs) {
     let testModeEnabled = false;
     let ga4ServerSideEnabled = false;
     let ga4SelectedEvents: string[] = [];
+    let metaServerSideEnabled = false;
+    let metaSelectedEvents: string[] = [];
 
     if (shop) {
       const shopSettings = await db.shopSettings.findUnique({
@@ -126,6 +295,44 @@ export async function action({ request }: ActionFunctionArgs) {
       );
 
       ga4SelectedEvents = parseCsvSetting(ga4EventsSelection?.assetValue);
+    }
+
+    if (workspaceId) {
+      const metaSelections = await db.shopAssetSelection.findMany({
+        where: {
+          workspaceId,
+          platform: "meta",
+          assetType: {
+            in: [
+              "Meta Server Side Enabled",
+              "Meta Selected Events",
+              "Meta Dataset / Pixel",
+            ],
+          },
+        },
+        select: {
+          assetType: true,
+          assetValue: true,
+        },
+      });
+
+      const metaMap = new Map(
+        metaSelections.map(
+          (item: (typeof metaSelections)[number]) => [
+            item.assetType,
+            item.assetValue,
+          ]
+        )
+      );
+
+      metaServerSideEnabled =
+        String(metaMap.get("Meta Server Side Enabled") || "false") === "true" &&
+        Boolean(String(metaMap.get("Meta Dataset / Pixel") || "").trim());
+
+      const rawMetaEvents = String(metaMap.get("Meta Selected Events") || "none");
+
+      metaSelectedEvents =
+        rawMetaEvents === "none" ? [] : parseCsvSetting(rawMetaEvents);
     }
 
     const log = await createEventDeliveryLog({
@@ -239,7 +446,7 @@ export async function action({ request }: ActionFunctionArgs) {
         },
         platform: "ga4",
         deliveryType: "server",
-        status: ga4ServerResult.status,
+        status: normalizeDeliveryStatus(ga4ServerResult.status),
         message: testModeEnabled
           ? `[TEST MODE] ${ga4ServerResult.message}`
           : ga4ServerResult.message,
@@ -248,6 +455,127 @@ export async function action({ request }: ActionFunctionArgs) {
           testMode: testModeEnabled,
           debugMode: testModeEnabled,
         },
+      });
+    }
+
+    let metaServerResult = null;
+
+    if (workspaceId && metaServerSideEnabled) {
+      const metaEventName = resolveMetaEventName(
+        event.event_name,
+        event.meta_event
+      );
+
+      const metaSkipRequested =
+        Boolean(event.meta && (event.meta as any).skip === true);
+
+      const payloadMetaSelectedEvents = getPayloadMetaSelectedEvents(payload);
+
+      const effectiveMetaSelectedEvents = Array.from(
+        new Set([...metaSelectedEvents, ...payloadMetaSelectedEvents])
+      );
+
+      const metaEventSelected = effectiveMetaSelectedEvents.includes(metaEventName);
+
+      if (metaSkipRequested) {
+        metaServerResult = {
+          success: false,
+          status: "skipped",
+          message: `Meta CAPI skipped. Browser pixel marked this event as duplicate: ${(event.meta as any)?.skip_reason || "duplicate"}.`,
+          responsePayload: {
+            eventSelected: metaEventSelected,
+            selectedEvents: metaSelectedEvents,
+            metaEventName,
+            skipReason: (event.meta as any)?.skip_reason || "duplicate",
+          },
+        };
+      } else if (metaEventSelected) {
+        const metaRouteSendClaimed = claimMetaRouteSend(
+          shop ?? "",
+          event.event_name,
+          event.event_id,
+          metaEventName
+        );
+
+        if (!metaRouteSendClaimed) {
+          metaServerResult = {
+            success: false,
+            status: "skipped",
+            message: `Meta CAPI skipped. Duplicate in-flight event already claimed for event_id ${event.event_id}.`,
+            responsePayload: {
+              duplicate: true,
+              inFlightDuplicate: true,
+              eventId: event.event_id,
+              eventName: event.event_name,
+              metaEventName,
+            },
+          };
+        } else {
+          const previousMetaDelivery = await findRecentMetaServerDelivery({
+            workspaceId,
+            shop,
+            eventId: event.event_id,
+            eventName: event.event_name,
+          });
+
+        if (previousMetaDelivery) {
+          metaServerResult = {
+            success: false,
+            status: "skipped",
+            message: `Meta CAPI skipped. Duplicate server event already sent for event_id ${event.event_id}.`,
+            responsePayload: {
+              duplicate: true,
+              previousLogId: previousMetaDelivery.id,
+              previousStatus: previousMetaDelivery.status,
+              previousCreatedAt: previousMetaDelivery.createdAt,
+              eventId: event.event_id,
+              eventName: event.event_name,
+              metaEventName,
+            },
+          };
+          } else {
+            metaServerResult = await dispatchToMeta(
+              {
+                ...event,
+                shop,
+                meta_event: metaEventName,
+              },
+              workspaceId,
+              {
+                testMode: testModeEnabled,
+                clientIpAddress: getClientIp(request),
+                clientUserAgent: request.headers.get("user-agent"),
+              }
+            );
+          }
+        }
+      } else {
+        metaServerResult = {
+          success: false,
+          status: "skipped",
+          message: `Meta CAPI skipped. Event ${metaEventName} is not selected.`,
+          responsePayload: {
+            eventSelected: false,
+            selectedEvents: metaSelectedEvents,
+            metaEventName,
+          },
+        };
+      }
+
+      await createEventDeliveryLog({
+        workspaceId,
+        shop,
+        event: {
+          ...event,
+          shop,
+        },
+        platform: "meta",
+        deliveryType: "server",
+        status: normalizeDeliveryStatus(metaServerResult.status),
+        message: testModeEnabled
+          ? `[TEST MODE] ${metaServerResult.message}`
+          : metaServerResult.message,
+        responsePayload: metaServerResult.responsePayload || {},
       });
     }
 
@@ -260,8 +588,10 @@ export async function action({ request }: ActionFunctionArgs) {
         workspaceFound: Boolean(workspaceId),
         eventName: event.event_name,
         eventId: event.event_id,
+        metaEvent: resolveMetaEventName(event.event_name, event.meta_event),
         googleAdsServer: googleAdsServerResult,
         ga4Server: ga4ServerResult,
+        metaServer: metaServerResult,
         sanitized: sanitizeTrackingEvent(event),
       },
       { headers: corsHeaders }
