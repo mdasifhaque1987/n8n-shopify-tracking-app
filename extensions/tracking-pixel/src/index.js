@@ -11,7 +11,7 @@ const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
 const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
 const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
 const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-const DH_PIXEL_VERSION = "2026-07-05-app-proxy-fallback-v5";
+const DH_PIXEL_VERSION = "2026-07-18-client-delivery-logs-v6";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
@@ -1200,16 +1200,24 @@ function sendGoogleAdsRemarketing(payload, config) {
 
 
 function sendToGoogleAds(payload, config) {
+  const deliveries = [];
+
   try {
     const googleAdsConfig = config?.googleAds;
 
     if (!googleAdsConfig?.enabled) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads skipped - not enabled", googleAdsConfig);
-      return;
+      DH_PIXEL_DEBUG && console.log(
+        "[DH Tracking Pixel] Google Ads skipped - not enabled",
+        googleAdsConfig
+      );
+
+      return deliveries;
     }
 
     const eventName = mapGoogleAdsEventName(payload);
-    const configured = googleAdsConfig.conversions?.[eventName];
+    const configured =
+      googleAdsConfig.conversions?.[eventName];
+
     const conversions = Array.isArray(configured)
       ? configured
       : configured
@@ -1217,25 +1225,53 @@ function sendToGoogleAds(payload, config) {
         : [];
 
     const validConversions = conversions.filter(
-      (conversion) => conversion?.conversionId && conversion?.conversionLabel
+      (conversion) =>
+        conversion?.conversionId &&
+        conversion?.conversionLabel
     );
 
     if (!validConversions.length) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads skipped - missing conversion", {
-        eventName,
-        available: Object.keys(googleAdsConfig.conversions || {}),
-        missingLabels: googleAdsConfig.missingLabels || [],
-      });
-      return;
+      DH_PIXEL_DEBUG && console.log(
+        "[DH Tracking Pixel] Google Ads skipped - missing conversion",
+        {
+          eventName,
+          available: Object.keys(
+            googleAdsConfig.conversions || {}
+          ),
+          missingLabels:
+            googleAdsConfig.missingLabels || [],
+        }
+      );
+
+      return deliveries;
     }
 
     validConversions.forEach((conversion) => {
-      const url = buildGoogleAdsUrl(payload, conversion);
+      const url = buildGoogleAdsUrl(
+        payload,
+        conversion
+      );
 
       fetch(url, {
         method: "GET",
         mode: "no-cors",
         keepalive: true,
+      });
+
+      deliveries.push({
+        platform: "google_ads",
+        status: "sent",
+        message:
+          "Google Ads client conversion request dispatched.",
+        eventName,
+        conversionName:
+          conversion.conversionName || "",
+        conversionActionId:
+          conversion.conversionActionId || "",
+        conversionId:
+          conversion.conversionId || "",
+        conversionLabel:
+          conversion.conversionLabel || "",
       });
 
       DH_PIXEL_DEBUG && console.log(
@@ -1246,8 +1282,27 @@ function sendToGoogleAds(payload, config) {
         conversion.conversionLabel
       );
     });
+
+    return deliveries;
   } catch (e) {
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads send error", e);
+    DH_PIXEL_DEBUG && console.log(
+      "[DH Tracking Pixel] Google Ads send error",
+      e
+    );
+
+    return [
+      {
+        platform: "google_ads",
+        status: "failed",
+        message:
+          "Google Ads client conversion dispatch failed.",
+        eventName: mapGoogleAdsEventName(payload),
+        error:
+          e instanceof Error
+            ? e.message
+            : String(e),
+      },
+    ];
   }
 }
 
@@ -1329,19 +1384,29 @@ function sendToGa4(payload, config) {
 
     const ga4Enabled =
       Boolean(measurementId) &&
-      (!config?.ga4 || config.ga4.enabled !== false) &&
-      (!config?.ga4 || config.ga4.deliveryMode !== "server");
+      (!config?.ga4 ||
+        config.ga4.enabled !== false) &&
+      (!config?.ga4 ||
+        config.ga4.deliveryMode !== "server");
 
     if (!ga4Enabled) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 skipped", {
-        measurementId,
-        deliveryMode: config?.ga4?.deliveryMode,
-        enabled: config?.ga4?.enabled,
-      });
-      return;
+      DH_PIXEL_DEBUG && console.log(
+        "[DH Tracking Pixel] GA4 skipped",
+        {
+          measurementId,
+          deliveryMode:
+            config?.ga4?.deliveryMode,
+          enabled: config?.ga4?.enabled,
+        }
+      );
+
+      return null;
     }
 
-    const url = buildGa4Url(payload, measurementId);
+    const url = buildGa4Url(
+      payload,
+      measurementId
+    );
 
     fetch(url, {
       method: "GET",
@@ -1349,9 +1414,41 @@ function sendToGa4(payload, config) {
       keepalive: true,
     });
 
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 sent", payload.ga4_event, measurementId);
+    DH_PIXEL_DEBUG && console.log(
+      "[DH Tracking Pixel] GA4 sent",
+      payload.ga4_event,
+      measurementId
+    );
+
+    return {
+      platform: "ga4",
+      status: "sent",
+      message: "GA4 client request dispatched.",
+      eventName:
+        payload.ga4_event ||
+        payload.original_event ||
+        "",
+      measurementId,
+    };
   } catch (e) {
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 send error", e);
+    DH_PIXEL_DEBUG && console.log(
+      "[DH Tracking Pixel] GA4 send error",
+      e
+    );
+
+    return {
+      platform: "ga4",
+      status: "failed",
+      message: "GA4 client dispatch failed.",
+      eventName:
+        payload.ga4_event ||
+        payload.original_event ||
+        "",
+      error:
+        e instanceof Error
+          ? e.message
+          : String(e),
+    };
   }
 }
 
@@ -1660,24 +1757,63 @@ register(({ analytics, browser }) => {
           testMode: config ? config.testMode : null,
         });
 
-        const serverSendPromise = sendToServer(payload);
+        const clientDeliveries = [];
 
         sendToMetaPixel(payload, config);
         sendGa4ClientSeed(payload, config);
-        sendToGa4(payload, config);
-        sendToGoogleAds(payload, config);
-        sendGoogleAdsRemarketing(payload, config);
 
-        const serverSent = await serverSendPromise;
+        const ga4ClientDelivery =
+          sendToGa4(payload, config);
 
-        if (!serverSent && isMetaCheckoutFallbackEvent(payload)) {
+        if (ga4ClientDelivery) {
+          clientDeliveries.push(
+            ga4ClientDelivery
+          );
+        }
+
+        const googleAdsClientDeliveries =
+          sendToGoogleAds(payload, config);
+
+        if (
+          Array.isArray(
+            googleAdsClientDeliveries
+          )
+        ) {
+          clientDeliveries.push(
+            ...googleAdsClientDeliveries
+          );
+        }
+
+        sendGoogleAdsRemarketing(
+          payload,
+          config
+        );
+
+        const serverPayload = {
+          ...payload,
+          client_deliveries:
+            clientDeliveries,
+        };
+
+        const serverSendPromise =
+          sendToServer(serverPayload);
+
+        const serverSent =
+          await serverSendPromise;
+
+        if (
+          !serverSent &&
+          isMetaCheckoutFallbackEvent(payload)
+        ) {
           DH_PIXEL_DEBUG && console.log(
             "[DH Tracking Pixel] primary checkout send failed; trying text fallback",
             payload.meta_event,
             payload.event_id
           );
 
-          await sendToServerTextFallback(payload);
+          await sendToServerTextFallback(
+            serverPayload
+          );
         }
       } catch (e) {
         DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel Error]", eventName, e);

@@ -49,7 +49,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   const returnPath =
     url.searchParams.get("returnPath") ||
-    "/app/settings";
+    "/app/settings?unlockPlatform=meta&loadMetaAssets=true";
 
   const workspace = await getOrCreateShopWorkspace(shop);
 

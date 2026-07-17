@@ -83,14 +83,120 @@ const validDeliveryStatuses = new Set<DeliveryStatus>([
 ]);
 
 function normalizeDeliveryStatus(value: unknown): DeliveryStatus {
-  const status = String(value || "failed") as DeliveryStatus;
+  const status = String(
+    value || "failed"
+  ) as DeliveryStatus;
 
   return validDeliveryStatuses.has(status)
     ? status
     : "failed";
 }
 
-const recentMetaRouteSends = new Map<string, number>();
+type ClientDeliveryReport = {
+  platform: "ga4" | "google_ads";
+  status: DeliveryStatus;
+  message: string;
+  responsePayload: Record<string, unknown>;
+};
+
+function getClientDeliveryReports(
+  payload: any
+): ClientDeliveryReport[] {
+  const rawReports =
+    payload?.client_deliveries;
+
+  if (!Array.isArray(rawReports)) {
+    return [];
+  }
+
+  const reports: ClientDeliveryReport[] = [];
+
+  for (
+    const rawReport of rawReports.slice(0, 50)
+  ) {
+    if (
+      !rawReport ||
+      typeof rawReport !== "object" ||
+      Array.isArray(rawReport)
+    ) {
+      continue;
+    }
+
+    const report =
+      rawReport as Record<string, unknown>;
+
+    const platform = String(
+      report.platform || ""
+    ).trim();
+
+    if (
+      platform !== "ga4" &&
+      platform !== "google_ads"
+    ) {
+      continue;
+    }
+
+    const rawStatus = String(
+      report.status || "sent"
+    );
+
+    const status: DeliveryStatus =
+      rawStatus === "failed"
+        ? "failed"
+        : rawStatus === "skipped"
+          ? "skipped"
+          : "sent";
+
+    const message =
+      String(
+        report.message ||
+          "Client request dispatched."
+      )
+        .trim()
+        .slice(0, 500) ||
+      "Client request dispatched.";
+
+    const responsePayload:
+      Record<string, unknown> = {
+        clientReported: true,
+        browserResponseVerifiable: false,
+      };
+
+    const allowedFields = [
+      "eventName",
+      "conversionName",
+      "conversionActionId",
+      "conversionId",
+      "conversionLabel",
+      "measurementId",
+      "error",
+    ];
+
+    for (const key of allowedFields) {
+      const value = report[key];
+
+      if (
+        typeof value === "string" &&
+        value.trim()
+      ) {
+        responsePayload[key] =
+          value.trim().slice(0, 500);
+      }
+    }
+
+    reports.push({
+      platform,
+      status,
+      message,
+      responsePayload,
+    });
+  }
+
+  return reports;
+}
+
+const recentMetaRouteSends =
+  new Map<string, number>();
 
 function claimMetaRouteSend(
   shop: string,
@@ -349,43 +455,20 @@ export async function action({ request }: ActionFunctionArgs) {
         ? "[TEST MODE] Event validated and logged."
         : "Event validated and logged.",
       responsePayload: {
-        mode: testModeEnabled ? "test" : "live",
+        mode: testModeEnabled
+          ? "test"
+          : "live",
         testMode: testModeEnabled,
       },
     });
 
-    let googleAdsServerResult = null;
+    const clientDeliveryReports =
+      getClientDeliveryReports(payload);
 
-    if (workspaceId && event.event_name === "purchase") {
-      googleAdsServerResult = await dispatchPurchaseToGoogleAds(
-        {
-          ...event,
-          shop,
-        },
-        workspaceId,
-        {
-          validateOnly: testModeEnabled,
-          testMode: testModeEnabled,
-        }
-      );
-
-      const googleAdsResponsePayload =
-        googleAdsServerResult.responsePayload &&
-        typeof googleAdsServerResult.responsePayload === "object" &&
-        !Array.isArray(googleAdsServerResult.responsePayload)
-          ? {
-              ...googleAdsServerResult.responsePayload,
-              mode: testModeEnabled ? "test" : "live",
-              testMode: testModeEnabled,
-              validateOnly: testModeEnabled,
-            }
-          : {
-              response: googleAdsServerResult.responsePayload || null,
-              mode: testModeEnabled ? "test" : "live",
-              testMode: testModeEnabled,
-              validateOnly: testModeEnabled,
-            };
-
+    for (
+      const clientDelivery of
+      clientDeliveryReports
+    ) {
       await createEventDeliveryLog({
         workspaceId,
         shop,
@@ -393,14 +476,171 @@ export async function action({ request }: ActionFunctionArgs) {
           ...event,
           shop,
         },
-        platform: "google_ads",
-        deliveryType: "server",
-        status: googleAdsServerResult.status,
+        platform:
+          clientDelivery.platform,
+        deliveryType: "client",
+        status:
+          clientDelivery.status,
         message: testModeEnabled
-          ? `[TEST MODE] ${googleAdsServerResult.message}`
-          : googleAdsServerResult.message,
-        responsePayload: googleAdsResponsePayload,
+          ? `[TEST MODE] ${clientDelivery.message}`
+          : clientDelivery.message,
+        responsePayload: {
+          ...clientDelivery.responsePayload,
+          mode: testModeEnabled
+            ? "test"
+            : "live",
+          testMode: testModeEnabled,
+        },
       });
+    }
+
+    let googleAdsServerResult = null;
+
+    if (
+      workspaceId &&
+      event.event_name === "purchase"
+    ) {
+      googleAdsServerResult =
+        await dispatchPurchaseToGoogleAds(
+          {
+            ...event,
+            shop,
+          },
+          workspaceId,
+          {
+            validateOnly:
+              testModeEnabled,
+            testMode:
+              testModeEnabled,
+          }
+        );
+
+      const googleAdsResponsePayload =
+        googleAdsServerResult.responsePayload &&
+        typeof googleAdsServerResult.responsePayload ===
+          "object" &&
+        !Array.isArray(
+          googleAdsServerResult.responsePayload
+        )
+          ? {
+              ...googleAdsServerResult.responsePayload,
+              mode: testModeEnabled
+                ? "test"
+                : "live",
+              testMode:
+                testModeEnabled,
+              validateOnly:
+                testModeEnabled,
+            }
+          : {
+              response:
+                googleAdsServerResult.responsePayload ||
+                null,
+              mode: testModeEnabled
+                ? "test"
+                : "live",
+              testMode:
+                testModeEnabled,
+              validateOnly:
+                testModeEnabled,
+            };
+
+      const perActionResults =
+        Array.isArray(
+          (googleAdsResponsePayload as any)
+            .results
+        )
+          ? (
+              googleAdsResponsePayload as any
+            ).results
+          : [];
+
+      if (perActionResults.length > 0) {
+        for (
+          const rawActionResult of
+          perActionResults
+        ) {
+          const actionResult =
+            rawActionResult &&
+            typeof rawActionResult ===
+              "object" &&
+            !Array.isArray(rawActionResult)
+              ? rawActionResult
+              : {};
+
+          const conversionName =
+            String(
+              actionResult.conversionName ||
+                ""
+            ).trim();
+
+          const resultMessage =
+            String(
+              actionResult.message ||
+                googleAdsServerResult.message
+            );
+
+          await createEventDeliveryLog({
+            workspaceId,
+            shop,
+            event: {
+              ...event,
+              shop,
+            },
+            platform: "google_ads",
+            deliveryType: "server",
+            status:
+              normalizeDeliveryStatus(
+                actionResult.status
+              ),
+            message: testModeEnabled
+              ? `[TEST MODE] ${
+                  conversionName
+                    ? `${conversionName}: `
+                    : ""
+                }${resultMessage}`
+              : `${
+                  conversionName
+                    ? `${conversionName}: `
+                    : ""
+                }${resultMessage}`,
+            responsePayload: {
+              ...actionResult,
+              apiMode:
+                (
+                  googleAdsResponsePayload as any
+                ).apiMode || null,
+              mode: testModeEnabled
+                ? "test"
+                : "live",
+              testMode:
+                testModeEnabled,
+              validateOnly:
+                testModeEnabled,
+            },
+          });
+        }
+      } else {
+        await createEventDeliveryLog({
+          workspaceId,
+          shop,
+          event: {
+            ...event,
+            shop,
+          },
+          platform: "google_ads",
+          deliveryType: "server",
+          status:
+            normalizeDeliveryStatus(
+              googleAdsServerResult.status
+            ),
+          message: testModeEnabled
+            ? `[TEST MODE] ${googleAdsServerResult.message}`
+            : googleAdsServerResult.message,
+          responsePayload:
+            googleAdsResponsePayload,
+        });
+      }
     }
 
 

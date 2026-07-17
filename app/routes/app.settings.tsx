@@ -3,7 +3,7 @@ import {
   resolveGoogleAccessToken,
   withGoogleAccessTokenRetry,
 } from "../services/google-token.server";
-import { useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import {
   Link,
   useFetcher,
@@ -86,8 +86,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (host) navParams.set("host", host);
   if (embedded) navParams.set("embedded", embedded);
   if (locale) navParams.set("locale", locale);
-  const shouldLoadGa4Assets = url.searchParams.get("loadGa4Assets") === "true" || url.searchParams.get("loadGoogleAssets") === "true";
-  const shouldLoadMetaAssets = url.searchParams.get("loadMetaAssets") === "true";
+  const shouldLoadGa4Assets =
+    url.searchParams.get("loadGa4Assets") === "true" ||
+    url.searchParams.get("loadGoogleAssets") === "true";
+  const shouldLoadMetaAssets =
+    url.searchParams.get("loadMetaAssets") === "true";
+  const requestedUnlockPlatform =
+    url.searchParams.get("unlockPlatform");
+  const unlockPlatform =
+    requestedUnlockPlatform === "google" ||
+    requestedUnlockPlatform === "meta"
+      ? requestedUnlockPlatform
+      : null;
 
   const getStatus = (platform: string) => {
     const connection = savedConnections.find(
@@ -279,6 +289,7 @@ id: true,
     navQuery: navParams.toString(),
     shouldLoadGa4Assets,
     shouldLoadMetaAssets,
+    unlockPlatform,
     connections: {
       google: getStatus("GOOGLE_ADS"),
       meta: getStatus("META"),
@@ -834,6 +845,7 @@ export default function ConfigurationPage() {
     navQuery,
     connections,
     assets,
+    unlockPlatform,
     savedAssetSelections,
     ga4DeliverySettings,
     testModeSettings,
@@ -869,6 +881,47 @@ export default function ConfigurationPage() {
     | undefined;
   const [selectedAssets, setSelectedAssets] =
     useState<Record<string, string>>(savedAssetSelections || {});
+
+  const [unlockedAssetFields, setUnlockedAssetFields] =
+    useState<Set<string>>(() => {
+      const fields =
+        unlockPlatform === "google"
+          ? [
+              "GA4 Property",
+              "Google Ads Account / Manager Account",
+              "Google Merchant Center",
+            ]
+          : unlockPlatform === "meta"
+            ? [
+                "Meta Business Portfolio",
+                "Meta Dataset / Pixel",
+              ]
+            : [];
+
+      return new Set(
+        fields.map((field) => `${unlockPlatform}:${field}`)
+      );
+    });
+
+  useEffect(() => {
+    if (!unlockPlatform || typeof window === "undefined") {
+      return;
+    }
+
+    const currentUrl = new URL(window.location.href);
+
+    currentUrl.searchParams.delete("unlockPlatform");
+    currentUrl.searchParams.delete("loadGoogleAssets");
+    currentUrl.searchParams.delete("loadGa4Assets");
+    currentUrl.searchParams.delete("loadMetaAssets");
+
+    window.history.replaceState(
+      window.history.state,
+      "",
+      `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`
+    );
+  }, [unlockPlatform]);
+
   const assetSelectionFetcher = useFetcher();
   const metaBusinessOptions = assets.meta?.businessPortfolios || [];
   const metaBusinessKey = "meta:Meta Business Portfolio";
@@ -881,6 +934,16 @@ export default function ConfigurationPage() {
   const metaDatasetOptions = assets.meta?.datasetsPixels || [];
   const metaDatasetKey = "meta:Meta Dataset / Pixel";
   const metaDatasetValue = selectedAssets[metaDatasetKey] || "";
+  const metaBusinessLocked = isLockedAssetField(
+    "meta",
+    "Meta Business Portfolio",
+    metaBusinessValue
+  );
+  const metaDatasetLocked = isLockedAssetField(
+    "meta",
+    "Meta Dataset / Pixel",
+    metaDatasetValue
+  );
   const selectedMetaDatasetLabel =
     metaDatasetOptions.find((option) => option.value === metaDatasetValue)?.label ||
     metaDatasetValue ||
@@ -1026,46 +1089,91 @@ export default function ConfigurationPage() {
     return `${platformKey}:${field}`;
   }
 
-  function isLockedAssetField(platformKey: string, field: string, value: string) {
-    if (!value) return false;
+  function isLockedAssetField(
+    platformKey: string,
+    field: string,
+    value: string
+  ) {
+    if (!value) {
+      return false;
+    }
 
-    return (
+    if (unlockedAssetFields.has(fieldKey(platformKey, field))) {
+      return false;
+    }
+
+    const googleField =
       platformKey === "google" &&
       [
         "GA4 Property",
         "Google Ads Account / Manager Account",
         "Google Merchant Center",
-      ].includes(field)
-    );
+      ].includes(field);
+
+    const metaField =
+      platformKey === "meta" &&
+      [
+        "Meta Business Portfolio",
+        "Meta Dataset / Pixel",
+      ].includes(field);
+
+    return googleField || metaField;
+  }
+
+  function lockAssetField(platformKey: string, field: string) {
+    const key = fieldKey(platformKey, field);
+
+    setUnlockedAssetFields((previous) => {
+      if (!previous.has(key)) {
+        return previous;
+      }
+
+      const next = new Set(previous);
+      next.delete(key);
+
+      return next;
+    });
   }
 
   function settingKey(platformKey: string, field: string, setting: string) {
     return `${platformKey}:${field}:${setting}`;
   }
 
-  function isTrackingFeatureEnabled(platformKey: string, field: string) {
-    const enabledKey = settingKey(platformKey, field, "enabled");
+  function isTrackingFeatureEnabled(
+    platformKey: string,
+    field: string
+  ) {
+    const enabledKey = settingKey(
+      platformKey,
+      field,
+      "enabled"
+    );
     const mainKey = fieldKey(platformKey, field);
 
-    if (Object.prototype.hasOwnProperty.call(selectedAssets, enabledKey)) {
+    if (
+      platformKey === "google" &&
+      field === "Google Ads Remarketing"
+    ) {
+      return selectedAssets[mainKey] === "enabled";
+    }
+
+    if (
+      Object.prototype.hasOwnProperty.call(
+        selectedAssets,
+        enabledKey
+      )
+    ) {
       return selectedAssets[enabledKey] === "true";
-    }
-
-    // GA4 should not be active from stale saved values.
-    if (platformKey === "google" && field === "GA4 Property") {
-      return false;
-    }
-
-    // Backward compatibility for existing selected Google Ads / Merchant settings.
-    if (selectedAssets[mainKey]) {
-      return true;
     }
 
     if (
       platformKey === "google" &&
-      field === "Google Ads Remarketing" &&
-      selectedAssets[mainKey] === "enabled"
+      field === "GA4 Property"
     ) {
+      return false;
+    }
+
+    if (selectedAssets[mainKey]) {
       return true;
     }
 
@@ -1283,19 +1391,6 @@ export default function ConfigurationPage() {
       return assets.google.merchantCenters;
     }
 
-    if (platformKey === "google" && field === "Google Ads Remarketing") {
-      return [
-        {
-          value: "enabled",
-          label: "Enabled - send Google Ads remarketing events",
-        },
-        {
-          value: "disabled",
-          label: "Disabled",
-        },
-      ];
-    }
-
     return [];
   }
 
@@ -1310,10 +1405,6 @@ export default function ConfigurationPage() {
 
     if (platformKey === "google" && field === "Google Merchant Center") {
       return "Merchant Center API pending";
-    }
-
-    if (platformKey === "google" && field === "Google Ads Remarketing") {
-      return "Select remarketing status";
     }
 
     return "Asset loading API pending";
@@ -1530,12 +1621,20 @@ export default function ConfigurationPage() {
           {platformConfigs.map((platform) => {
             const connection = connections[platform.key as keyof typeof connections];
             const isConnected = connection?.connected;
-            const oauthParams = new URLSearchParams({
-    shop,
-    returnPath: "/app/settings",
-      });
+            const returnPath =
+              platform.key === "google"
+                ? "/app/settings?unlockPlatform=google&loadGoogleAssets=true"
+                : platform.key === "meta"
+                  ? "/app/settings?unlockPlatform=meta&loadMetaAssets=true"
+                  : "/app/settings";
 
-      const oauthUrl = `${platform.oauthPath}?${oauthParams.toString()}`;
+            const oauthParams = new URLSearchParams({
+              shop,
+              returnPath,
+            });
+
+            const oauthUrl =
+              `${platform.oauthPath}?${oauthParams.toString()}`;
 
             return (
               <article
@@ -1639,7 +1738,9 @@ export default function ConfigurationPage() {
                           )}
 
                           <small style={{ color: "#6b7280", fontWeight: 700 }}>
-                            Temporary unlocked mode: you can change this Business Portfolio while setup is in progress.
+                            {metaBusinessLocked
+                              ? "Locked after saving Dataset / Pixel settings. Disconnect and reconnect Meta to change it."
+                              : "Unlocked after Connect/Reconnect. It will lock after Dataset / Pixel settings are saved."}
                           </small>
                         </div>
                       </div>
@@ -1750,7 +1851,7 @@ export default function ConfigurationPage() {
                         const isEnabled = isTrackingFeatureEnabled(platform.key, field);
                         const selectedValue = selectedAssets[key] || "";
                         const isLocked = isLockedAssetField(platform.key, field, selectedValue);
-                        const isDisabled = !isEnabled || isLocked;
+                        const isDisabled = isLocked;
                         const displayOptions =
                           selectedValue && !options.some((option) => option.value === selectedValue)
                             ? [
@@ -1790,11 +1891,28 @@ export default function ConfigurationPage() {
                                   type="checkbox"
                                   checked={isEnabled}
                                   onChange={(event) => {
+                                    const checked =
+                                      event.currentTarget.checked;
+
+                                    if (
+                                      platform.key === "google" &&
+                                      field === "Google Ads Remarketing"
+                                    ) {
+                                      saveSetting(
+                                        platform.key,
+                                        field,
+                                        checked ? "enabled" : "disabled",
+                                        checked ? "Enabled" : "Disabled"
+                                      );
+
+                                      return;
+                                    }
+
                                     saveSetting(
                                       platform.key,
                                       `${field}:enabled`,
-                                      event.currentTarget.checked ? "true" : "false",
-                                      event.currentTarget.checked ? "Enabled" : "Disabled"
+                                      checked ? "true" : "false",
+                                      checked ? "Enabled" : "Disabled"
                                     );
                                   }}
                                 />
@@ -1805,17 +1923,16 @@ export default function ConfigurationPage() {
                               </small>
                             </div>
 
-                            <label style={{ ...styles.label, width: "100%", boxSizing: "border-box", gridColumn: "1 / 2" }}>
+                            {field !== "Google Ads Remarketing" && (
+                              <label style={{ ...styles.label, width: "100%", boxSizing: "border-box", gridColumn: "1 / 2" }}>
                               {field}
                               <select
                                 value={selectedValue}
                                 disabled={isDisabled}
                                 title={
-                                  !isEnabled
-                                    ? "Enable this option first."
-                                    : isLocked
-                                      ? "This account is locked after selection. Disconnect and reconnect Google to change it."
-                                      : undefined
+                                  isLocked
+                                    ? `This asset is locked after selection. Disconnect and reconnect ${platform.name} to change it.`
+                                    : undefined
                                 }
                                 onChange={(event) => {
                                   const nextValue = event.target.value;
@@ -1837,6 +1954,11 @@ export default function ConfigurationPage() {
                                         assetLabel: selectedLabel,
                                       },
                                       { method: "post" }
+                                    );
+
+                                    lockAssetField(
+                                      platform.key,
+                                      field
                                     );
 
                                     if (platform.key === "google" && field === "GA4 Property") {
@@ -1868,16 +1990,17 @@ export default function ConfigurationPage() {
 
                               {!isEnabled && (
                                 <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                                  Enable this option first to select or configure it.
+                                  Tracking is disabled. You may select the asset now and enable tracking when ready.
                                 </small>
                               )}
 
                               {isEnabled && isLocked && (
                                 <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                                  Locked after selection. To change this account, disconnect Google and connect again.
+                                  Locked after selection. Disconnect and reconnect {platform.name} to change it.
                                 </small>
                               )}
-                            </label>
+                              </label>
+                            )}
 
                             {platform.key === "google" && field === "GA4 Property" && (
                               <button
@@ -1914,32 +2037,23 @@ export default function ConfigurationPage() {
                                 Create Feed
                               </button>
                             )}
-
-                            {platform.key === "google" && field === "Google Ads Remarketing" && (
-                              <div style={{ display: "grid", gap: 10, width: "100%" }}>
-                                <span
+                            {platform.key === "google" &&
+                              field === "Google Ads Remarketing" && (
+                                <button
+                                  type="button"
                                   style={
-                                    isEnabled && selectedValue === "enabled"
-                                      ? styles.connectedBadge
-                                      : styles.pendingBadge
+                                    isEnabled
+                                      ? styles.inlineActionButton
+                                      : styles.disabledButton
+                                  }
+                                  disabled={!isEnabled}
+                                  onClick={() =>
+                                    setActiveModal("remarketing")
                                   }
                                 >
-                                  {isEnabled && selectedValue === "enabled"
-                                    ? "Remarketing Active"
-                                    : "Remarketing Disabled"}
-                                </span>
-
-                                {isEnabled && selectedValue === "enabled" && (
-                                  <button
-                                    type="button"
-                                    style={styles.inlineActionButton}
-                                    onClick={() => setActiveModal("remarketing")}
-                                  >
-                                    Remarketing Configuration
-                                  </button>
-                                )}
-                              </div>
-                            )}
+                                  Configuration
+                                </button>
+                              )}
                           </div>
                         );
                       })}
@@ -2057,8 +2171,23 @@ export default function ConfigurationPage() {
             <label style={styles.label}>
               Dataset / Pixel
               <select
-                style={styles.select}
+                style={
+                  metaDatasetLocked
+                    ? {
+                        ...styles.select,
+                        backgroundColor: "#f3f4f6",
+                        color: "#6b7280",
+                        cursor: "not-allowed",
+                      }
+                    : styles.select
+                }
                 value={metaDatasetValue}
+                disabled={metaDatasetLocked}
+                title={
+                  metaDatasetLocked
+                    ? "Disconnect and reconnect Meta to change the Dataset / Pixel."
+                    : undefined
+                }
                 onChange={(event) => {
                   const nextDatasetId = event.currentTarget.value;
 
@@ -2246,6 +2375,15 @@ export default function ConfigurationPage() {
                     { method: "post" }
                   );
 
+                  lockAssetField(
+                    "meta",
+                    "Meta Business Portfolio"
+                  );
+                  lockAssetField(
+                    "meta",
+                    "Meta Dataset / Pixel"
+                  );
+
                   if (metaCapiAccessTokenInput.trim()) {
                     setSelectedAssets((previous) => ({
                       ...previous,
@@ -2291,8 +2429,23 @@ export default function ConfigurationPage() {
               <label style={styles.label}>
                 Business Portfolio
                 <select
-                  style={styles.select}
+                  style={
+                    metaBusinessLocked
+                      ? {
+                          ...styles.select,
+                          backgroundColor: "#f3f4f6",
+                          color: "#6b7280",
+                          cursor: "not-allowed",
+                        }
+                      : styles.select
+                  }
                   value={metaBusinessValue}
+                  disabled={metaBusinessLocked}
+                  title={
+                    metaBusinessLocked
+                      ? "Disconnect and reconnect Meta to change the Business Portfolio."
+                      : undefined
+                  }
                   onChange={(event) => {
                     const nextBusinessId = event.currentTarget.value;
 
@@ -2323,8 +2476,14 @@ export default function ConfigurationPage() {
 
               <button
                 type="button"
-                style={metaBusinessValue ? styles.primaryButton : styles.disabledButton}
-                disabled={!metaBusinessValue}
+                style={
+                  !metaBusinessLocked && metaBusinessValue
+                    ? styles.primaryButton
+                    : styles.disabledButton
+                }
+                disabled={
+                  metaBusinessLocked || !metaBusinessValue
+                }
                 onClick={() => {
                   const selectedOption = metaBusinessOptions.find(
                     (option) => option.value === metaBusinessValue
@@ -2342,9 +2501,17 @@ export default function ConfigurationPage() {
                   );
 
                   setActiveModal(null);
+
+                  setTimeout(() => {
+                    window.location.href = withNav(
+                      "/app/settings?unlockPlatform=meta&loadMetaAssets=true"
+                    );
+                  }, 700);
                 }}
               >
-                Save Business Portfolio
+                {metaBusinessLocked
+                  ? "Business Portfolio Locked"
+                  : "Save Business Portfolio"}
               </button>
             </div>
           </div>
@@ -3034,28 +3201,11 @@ export default function ConfigurationPage() {
         <h3 style={{ marginTop: 0 }}>Configuration tools</h3>
 
         <p style={{ color: "#4b5563", lineHeight: 1.6 }}>
-          To keep the app faster, Google asset lists are not loaded automatically on every visit.
-          Load them only when you need to refresh GA4, Google Ads, or Merchant Center selections.
+          Review event delivery activity or open the configuration documentation.
+          Connect or reconnect Google whenever its asset selections need to be changed.
         </p>
 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <button
-            type="button"
-            onClick={() => navigate(withNav("/app/settings?loadGa4Assets=true"))}
-            style={{
-              display: "inline-block",
-              padding: "10px 16px",
-              backgroundColor: "#2563eb",
-              color: "white",
-              textDecoration: "none",
-              borderRadius: 8,
-              fontWeight: 700,
-              border: "none",
-              cursor: "pointer",
-            }}
-          >
-            Load GA4 assets
-          </button>
 
           <button
             type="button"
@@ -3203,6 +3353,8 @@ const styles: Record<string, CSSProperties> = {
   },
   select: {
     width: "100%",
+    minWidth: 0,
+    boxSizing: "border-box",
     border: "1px solid #d1d5db",
     borderRadius: 10,
     padding: "10px 12px",
@@ -3211,6 +3363,8 @@ const styles: Record<string, CSSProperties> = {
   },
   input: {
     width: "100%",
+    minWidth: 0,
+    boxSizing: "border-box",
     border: "1px solid #d1d5db",
     borderRadius: 10,
     padding: "10px 12px",
@@ -3219,6 +3373,8 @@ const styles: Record<string, CSSProperties> = {
   },
   textarea: {
     width: "100%",
+    minWidth: 0,
+    boxSizing: "border-box",
     minHeight: 90,
     border: "1px solid #d1d5db",
     borderRadius: 10,
@@ -3363,9 +3519,11 @@ const styles: Record<string, CSSProperties> = {
     padding: 20,
   },
   modal: {
+    boxSizing: "border-box",
+    overflowX: "hidden",
+    overflowY: "auto",
     width: "min(760px, 100%)",
     maxHeight: "90vh",
-    overflow: "auto",
     background: "#fff",
     borderRadius: 18,
     padding: 22,
@@ -3391,6 +3549,10 @@ const styles: Record<string, CSSProperties> = {
   modalGrid: {
     display: "grid",
     gap: 14,
+    width: "100%",
+    minWidth: 0,
+    boxSizing: "border-box",
+    overflowX: "hidden",
   },
   checkGrid: {
     display: "grid",

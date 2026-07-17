@@ -642,13 +642,6 @@ export async function dispatchPurchaseToGoogleAds(
       ? dispatchPurchaseToGoogleAdsApi
       : dispatchPurchaseToGoogleAdsDataManager;
 
-  if (conversionActions.length === 1) {
-    return dispatchOne(event, workspaceId, {
-      ...options,
-      conversionActionOverride: conversionActions[0],
-    });
-  }
-
   const results = [];
 
   for (const conversionAction of conversionActions) {

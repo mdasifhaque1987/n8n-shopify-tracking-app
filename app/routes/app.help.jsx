@@ -36,7 +36,7 @@ export default function HelpPage() {
     },
     {
       title: "2. Configure Google assets",
-      body: "Go to Configuration. Use Load Google assets only when you need to select or refresh GA4 properties, data streams, Google Ads accounts, conversion actions, or Merchant Center assets."
+      body: "Go to Configuration. Connect or reconnect Google when you need to select or change GA4 properties, data streams, Google Ads accounts, conversion actions, or Merchant Center assets."
     },
     {
       title: "3. Enable server-side purchase sending",
@@ -65,15 +65,37 @@ export default function HelpPage() {
         border: "1px solid #e5e7eb",
         marginBottom: 24
       }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 12,
+            width: "100%",
+          }}
+        >
           <img
-            src="/assets/logos/dh-logo.svg"
-            alt="Data Hatches logo"
-            style={{ width: 54, height: 54, objectFit: "contain" }}
+            src="/assets/logos/dh-logo.png"
+            alt="DH Conversions"
+            style={{
+              height: 36,
+              width: "auto",
+              maxWidth: 88,
+              objectFit: "contain",
+              display: "block",
+              flexShrink: 0,
+            }}
           />
-          <div>
-            <p style={{ color: "#2563eb", fontWeight: 800, margin: 0 }}>Documentation</p>
-            <h1 style={{ margin: "4px 0" }}>Help / Configuration Guide</h1>
+          <div style={{ minWidth: 0 }}>
+
+            <h1
+              style={{
+                margin: 0,
+                lineHeight: 1.2,
+                fontSize: 28,
+              }}
+            >
+              Help / Configuration Guide
+            </h1>
           </div>
         </div>
 

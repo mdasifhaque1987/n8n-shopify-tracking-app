@@ -1,4 +1,4 @@
-import { Link, useLoaderData, useLocation } from "react-router";
+import { Form, Link, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
@@ -7,6 +7,15 @@ export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
   const url = new URL(request.url);
+  const navParams = new URLSearchParams();
+  const host = url.searchParams.get("host");
+  const embedded = url.searchParams.get("embedded");
+  const locale = url.searchParams.get("locale");
+
+  navParams.set("shop", session.shop);
+  if (host) navParams.set("host", host);
+  if (embedded) navParams.set("embedded", embedded);
+  if (locale) navParams.set("locale", locale);
 
   const platform = url.searchParams.get("platform") || "";
   const status = url.searchParams.get("status") || "";
@@ -22,11 +31,12 @@ export const loader = async ({ request }) => {
     orderBy: {
       createdAt: "desc",
     },
-    take: 100,
+    take: 250,
   });
 
   return {
     shop: session.shop,
+    navQuery: navParams.toString(),
     filters: {
       platform,
       status,
@@ -40,10 +50,31 @@ export const loader = async ({ request }) => {
       eventName: log.eventName,
       eventId: log.eventId,
       status: log.status,
+      target: getLogTarget(
+        log.responsePayload
+      ),
       message: log.message,
     })),
   };
 };
+
+function getLogTarget(responsePayload) {
+  if (
+    !responsePayload ||
+    typeof responsePayload !== "object" ||
+    Array.isArray(responsePayload)
+  ) {
+    return "-";
+  }
+
+  return (
+    responsePayload.conversionName ||
+    responsePayload.measurementId ||
+    responsePayload.conversionActionId ||
+    responsePayload.conversionId ||
+    "-"
+  );
+}
 
 function formatDate(value) {
   try {
@@ -63,23 +94,26 @@ function getStatusStyle(status) {
 
 export default function DeliveryLogs() {
   const data = useLoaderData();
-  const location = useLocation();
 
   const withNav = (path) => {
-    const params = new URLSearchParams(location.search);
+    const [basePath, existingQuery = ""] = path.split("?");
+    const params = new URLSearchParams(existingQuery);
+    const navParams = new URLSearchParams(data.navQuery || "");
 
-    if (!params.get("shop") && data.shop) {
-      params.set("shop", data.shop);
-    }
+    navParams.forEach((value, key) => {
+      if (!params.has(key)) {
+        params.set(key, value);
+      }
+    });
 
     const query = params.toString();
 
-    if (!query) {
-      return path;
-    }
-
-    return `${path}${path.includes("?") ? "&" : "?"}${query}`;
+    return query ? `${basePath}?${query}` : basePath;
   };
+
+  const navigationFields = Array.from(
+    new URLSearchParams(data.navQuery || "").entries()
+  );
 
   return (
     <main style={styles.page}>
@@ -94,7 +128,20 @@ export default function DeliveryLogs() {
         </Link>
       </div>
 
-      <form method="get" style={styles.filters}>
+      <Form
+        method="get"
+        action="/app/delivery-logs"
+        style={styles.filters}
+      >
+        {navigationFields.map(([name, value]) => (
+          <input
+            key={name}
+            type="hidden"
+            name={name}
+            value={value}
+          />
+        ))}
+
         <label style={styles.label}>
           Platform
           <select name="platform" defaultValue={data.filters.platform} style={styles.input}>
@@ -136,10 +183,13 @@ export default function DeliveryLogs() {
           Filter
         </button>
 
-        <Link to={location.pathname} style={styles.secondaryLink}>
+        <Link
+          to={withNav("/app/delivery-logs")}
+          style={styles.secondaryLink}
+        >
           Clear
         </Link>
-      </form>
+      </Form>
 
       {data.logs.length === 0 ? (
         <div style={styles.emptyState}>No delivery logs found.</div>
@@ -152,6 +202,7 @@ export default function DeliveryLogs() {
                 <th style={styles.th}>Platform</th>
                 <th style={styles.th}>Type</th>
                 <th style={styles.th}>Event</th>
+                <th style={styles.th}>Target</th>
                 <th style={styles.th}>Event ID</th>
                 <th style={styles.th}>Status</th>
                 <th style={styles.th}>Message</th>
@@ -164,6 +215,7 @@ export default function DeliveryLogs() {
                   <td style={styles.td}>{log.platform}</td>
                   <td style={styles.td}>{log.deliveryType}</td>
                   <td style={styles.td}>{log.eventName}</td>
+                  <td style={styles.td}>{log.target}</td>
                   <td style={styles.tdSmall}>{log.eventId}</td>
                   <td style={styles.td}>
                     <span style={{ ...styles.statusBadge, ...getStatusStyle(log.status) }}>
