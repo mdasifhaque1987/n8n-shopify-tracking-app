@@ -776,6 +776,10 @@ export async function action({ request }: ActionFunctionArgs) {
 const metaEventOptions = [
   { value: "PageView", label: "PageView" },
   { value: "ViewContent", label: "ViewContent" },
+  {
+    value: "ViewContentList",
+    label: "ViewContentList - custom event",
+  },
   { value: "Search", label: "Search" },
   { value: "AddToCart", label: "AddToCart" },
   { value: "InitiateCheckout", label: "InitiateCheckout" },

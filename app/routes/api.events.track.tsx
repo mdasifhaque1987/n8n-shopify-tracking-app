@@ -49,7 +49,7 @@ function mapGa4EventToMeta(eventName: string) {
   const map: Record<string, string> = {
     page_view: "PageView",
     view_item: "ViewContent",
-    view_item_list: "ViewContent",
+    view_item_list: "ViewContentList",
     view_cart: "ViewContent",
     add_to_cart: "AddToCart",
     begin_checkout: "InitiateCheckout",

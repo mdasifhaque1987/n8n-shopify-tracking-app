@@ -230,7 +230,7 @@ function mapEvent(name) {
     },
     collection_viewed: {
       ga4: "view_item_list",
-      meta: "ViewContent",
+      meta: "ViewContentList",
     },
     product_viewed: {
       ga4: "view_item",
@@ -807,6 +807,38 @@ function getItems(data) {
   const cartLine = data.cartLine || {};
   const productVariant = data.productVariant || cartLine.merchandise || {};
   const product = productVariant.product || {};
+  const collection = data.collection || {};
+
+  if (Array.isArray(collection.productVariants)) {
+    return collection.productVariants.map((variant) => {
+      const variantProduct = variant.product || {};
+
+      return {
+        item_id: safeString(
+          variant.id ||
+          variantProduct.id
+        ),
+        item_name:
+          variantProduct.title ||
+          variant.title,
+        product_id: safeString(
+          variantProduct.id
+        ),
+        variant_id: safeString(
+          variant.id
+        ),
+        sku: safeString(
+          variant.sku
+        ),
+        price: cleanMoney(
+          variant.price?.amount
+        ),
+        quantity: 1,
+        currency:
+          variant.price?.currencyCode,
+      };
+    });
+  }
 
   if (Array.isArray(checkout.lineItems)) {
     return checkout.lineItems.map((line) => {
@@ -850,25 +882,67 @@ async function buildPayload(event, config, browser) {
   const productVariant = data.productVariant || cartLine.merchandise || {};
   const product = productVariant.product || {};
 
+  const collection = data.collection || {};
+  const collectionVariants =
+    Array.isArray(
+      collection.productVariants
+    )
+      ? collection.productVariants
+      : [];
+
+  const items = getItems(data);
+
+  const collectionValue =
+    collectionVariants.length
+      ? Number(
+          collectionVariants
+            .reduce(
+              (sum, variant) =>
+                sum +
+                (
+                  cleanMoney(
+                    variant?.price?.amount
+                  ) || 0
+                ),
+              0
+            )
+            .toFixed(6)
+        )
+      : undefined;
+
   const value =
-    cleanMoney(checkout.totalPrice?.amount) ||
-    cleanMoney(cartLine.cost?.totalAmount?.amount) ||
-    cleanMoney(productVariant.price?.amount);
+    cleanMoney(
+      checkout.totalPrice?.amount
+    ) ||
+    cleanMoney(
+      cartLine.cost?.totalAmount?.amount
+    ) ||
+    cleanMoney(
+      productVariant.price?.amount
+    ) ||
+    collectionValue;
 
   const currency =
     checkout.currencyCode ||
     checkout.totalPrice?.currencyCode ||
-    cartLine.cost?.totalAmount?.currencyCode ||
-    productVariant.price?.currencyCode;
+    cartLine.cost?.totalAmount
+      ?.currencyCode ||
+    productVariant.price
+      ?.currencyCode ||
+    collectionVariants[0]
+      ?.price?.currencyCode;
 
   const itemId =
     productVariant.id ||
     product.id ||
     cartLine.merchandise?.id ||
+    collectionVariants[0]?.id ||
     undefined;
 
-  const transactionId = checkout.order?.id || checkout.token || undefined;
-  const items = getItems(data);
+  const transactionId =
+    checkout.order?.id ||
+    checkout.token ||
+    undefined;
   const attribution = await getAttribution(event, browser);
   const customer = await getCustomerForEvent(data, browser);
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
@@ -1048,12 +1122,15 @@ function getRemarketingPageType(eventName) {
   return map[eventName] || "other";
 }
 
-function getFirstItem(payload) {
-  if (Array.isArray(payload.items) && payload.items.length) {
-    return payload.items[0] || {};
+function getRemarketingItems(payload) {
+  if (
+    Array.isArray(payload.items) &&
+    payload.items.length
+  ) {
+    return payload.items;
   }
 
-  return {};
+  return [];
 }
 
 function buildRemarketingProductId(item, itemIdFormat) {
@@ -1112,11 +1189,37 @@ function buildGoogleAdsRemarketingUrl(payload, remarketingConfig) {
     ""
   ).replace(/^AW-/, "");
 
-  const eventName = normalizeRemarketingEventName(payload);
-  const item = getFirstItem(payload);
-  const itemIdFormat = remarketingConfig.itemIdFormat || "shopify_country_product_variant";
-  const productId = buildRemarketingProductId(item, itemIdFormat);
-  const pageType = getRemarketingPageType(eventName);
+  const eventName =
+    normalizeRemarketingEventName(
+      payload
+    );
+
+  const itemIdFormat =
+    remarketingConfig.itemIdFormat ||
+    "shopify_country_product_variant";
+
+  const remarketingItems =
+    getRemarketingItems(payload);
+
+  const productIds =
+    remarketingItems
+      .map((item) =>
+        buildRemarketingProductId(
+          item,
+          itemIdFormat
+        )
+      )
+      .filter(Boolean);
+
+  const productIdValue =
+    productIds.length > 1
+      ? JSON.stringify(productIds)
+      : productIds[0] || "";
+
+  const pageType =
+    getRemarketingPageType(
+      eventName
+    );
 
   const params = new URLSearchParams();
 
@@ -1139,8 +1242,12 @@ function buildGoogleAdsRemarketingUrl(payload, remarketingConfig) {
   customParams.push(`event=${encodeURIComponent(eventName)}`);
   customParams.push(`ecomm_pagetype=${encodeURIComponent(pageType)}`);
 
-  if (productId) {
-    customParams.push(`ecomm_prodid=${encodeURIComponent(productId)}`);
+  if (productIdValue) {
+    customParams.push(
+      `ecomm_prodid=${encodeURIComponent(
+        productIdValue
+      )}`
+    );
   }
 
   if (payload.value !== undefined && payload.value !== null) {
