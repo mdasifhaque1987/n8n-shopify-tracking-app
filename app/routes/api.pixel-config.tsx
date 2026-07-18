@@ -141,9 +141,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const remarketingEnabled =
       String(selectedAssets["google:Google Ads Remarketing"] || "") === "enabled";
 
-    const remarketingDeliveryMode =
-      String(selectedAssets["google:Google Ads Remarketing:delivery_mode"] || "client");
-
     const remarketingEvents = String(
       selectedAssets["google:Google Ads Remarketing:events"] || ""
     )
@@ -157,11 +154,38 @@ export async function loader({ request }: LoaderFunctionArgs) {
         "shopify_country_product_variant"
     );
 
+    const remarketingConversionAction = selectedGoogleAdsCustomerId
+      ? await db.googleAdsConversionAction.findFirst({
+          where: {
+            workspaceId: settings.workspaceId,
+            googleAdsCustomerId: selectedGoogleAdsCustomerId,
+            isActive: true,
+            conversionId: {
+              not: null,
+            },
+          },
+          select: {
+            conversionId: true,
+          },
+          orderBy: {
+            updatedAt: "desc",
+          },
+        })
+      : null;
+
+    const remarketingConversionId = cleanCustomerId(
+      remarketingConversionAction?.conversionId
+    );
+
     googleAdsRemarketing = {
-      enabled: Boolean(remarketingEnabled && selectedGoogleAdsCustomerId),
-      conversionId: selectedGoogleAdsCustomerId || null,
+      enabled: Boolean(
+        remarketingEnabled &&
+          selectedGoogleAdsCustomerId &&
+          remarketingConversionId
+      ),
+      conversionId: remarketingConversionId || null,
       googleAdsCustomerId: selectedGoogleAdsCustomerId || null,
-      deliveryMode: remarketingDeliveryMode === "server" ? "server" : "client",
+      deliveryMode: "client",
       events: remarketingEvents,
       itemIdFormat: remarketingItemIdFormat,
     };
@@ -236,7 +260,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
       pixels: {
         ga4Id: ga4MeasurementId,
         googleAdsId: settings?.googleAdsId || null,
-        facebookPixelId: settings?.facebookPixelId || null,
+        facebookPixelId:
+          metaConfig.pixelId ||
+          settings?.facebookPixelId ||
+          null,
         tiktokPixelId: settings?.tiktokPixelId || null,
         pinterestTagId: settings?.pinterestTagId || null,
         linkedinPid: settings?.linkedinPid || null,

@@ -1255,12 +1255,6 @@ export default function ConfigurationPage() {
     { value: "search", label: "Search" },
   ];
 
-  const deliveryModeOptions = [
-    { value: "client", label: "Client-side only" },
-    { value: "server", label: "Server-side only" },
-    { value: "both", label: "Both client-side and server-side" },
-  ];
-
   const itemIdFormatOptions = [
     {
       value: "shopify_country_product_variant",
@@ -1313,23 +1307,6 @@ export default function ConfigurationPage() {
       assetType,
       nextEvents.join(","),
       nextEvents.join(", ")
-    );
-  }
-
-  function getDeliveryMode(platformKey: string, assetType: string) {
-    return selectedAssets[`${platformKey}:${assetType}:delivery_mode`] || "client";
-  }
-
-  function saveDeliveryMode(platformKey: string, assetType: string, deliveryMode: string) {
-    const label =
-      deliveryModeOptions.find((option) => option.value === deliveryMode)?.label ||
-      deliveryMode;
-
-    saveSetting(
-      platformKey,
-      `${assetType}:delivery_mode`,
-      deliveryMode,
-      label
     );
   }
 
@@ -2522,23 +2499,6 @@ export default function ConfigurationPage() {
         <Modal title="Google Ads Remarketing Configuration" onClose={() => setActiveModal(null)}>
           <div style={styles.modalGrid}>
             <label style={styles.label}>
-              Delivery Mode
-              <select
-                style={styles.select}
-                value={getDeliveryMode("google", "Google Ads Remarketing")}
-                onChange={(event) =>
-                  saveDeliveryMode("google", "Google Ads Remarketing", event.currentTarget.value)
-                }
-              >
-                {deliveryModeOptions.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label style={styles.label}>
               Item ID Format
               <select
                 style={styles.select}
@@ -2595,8 +2555,8 @@ export default function ConfigurationPage() {
             </div>
 
             <p style={{ color: "#6b7280", lineHeight: 1.6 }}>
-              Client Side sends remarketing events from the browser/customer pixel.
-              Server Side sends selected remarketing events from the app backend.
+              Remarketing events are sent client-side from the Shopify Customer Events pixel.
+              Use the same item ID format as your Merchant Center product feed.
             </p>
 
             <div style={styles.modalActions}>
