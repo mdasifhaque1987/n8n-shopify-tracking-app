@@ -79,6 +79,7 @@ function mergeAddress(
     state: firstValue(
       current.state,
       order.province_code,
+      order.provinceCode,
       order.province,
       order.state
     ),
@@ -91,6 +92,7 @@ function mergeAddress(
     country: firstValue(
       current.country,
       order.country_code,
+      order.countryCodeV2,
       order.country,
       order.countryCode
     ),
@@ -148,7 +150,65 @@ async function getShopifyAccessToken(shop: string) {
   return session?.accessToken || "";
 }
 
-async function shopifyAdminFetch(shop: string, path: string) {
+const SHOPIFY_ORDER_FIELDS = `
+  id
+  legacyResourceId
+  name
+  email
+  phone
+  customer {
+    legacyResourceId
+    email
+    phone
+    firstName
+    lastName
+    defaultAddress {
+      firstName
+      lastName
+      phone
+      address1
+      address2
+      city
+      province
+      provinceCode
+      zip
+      country
+      countryCodeV2
+    }
+  }
+  billingAddress {
+    firstName
+    lastName
+    phone
+    address1
+    address2
+    city
+    province
+    provinceCode
+    zip
+    country
+    countryCodeV2
+  }
+  shippingAddress {
+    firstName
+    lastName
+    phone
+    address1
+    address2
+    city
+    province
+    provinceCode
+    zip
+    country
+    countryCodeV2
+  }
+`;
+
+async function shopifyAdminGraphql(
+  shop: string,
+  query: string,
+  variables: Record<string, unknown>
+) {
   const clean = cleanShop(shop);
   const accessToken = await getShopifyAccessToken(clean);
 
@@ -156,21 +216,33 @@ async function shopifyAdminFetch(shop: string, path: string) {
     return null;
   }
 
-  const url = `https://${clean}/admin/api/${getAdminApiVersion()}${path}`;
+  const url = `https://${clean}/admin/api/${getAdminApiVersion()}/graphql.json`;
 
   const response = await fetch(url, {
-    method: "GET",
+    method: "POST",
     headers: {
       "X-Shopify-Access-Token": accessToken,
       "Content-Type": "application/json",
     },
+    body: JSON.stringify({ query, variables }),
   });
 
   if (!response.ok) {
     return null;
   }
 
-  return response.json().catch(() => null);
+  const result = await response.json().catch(() => null);
+
+  if (
+    !result ||
+    typeof result !== "object" ||
+    !result.data ||
+    (Array.isArray(result.errors) && result.errors.length > 0)
+  ) {
+    return null;
+  }
+
+  return result.data as Record<string, unknown>;
 }
 
 async function fetchShopifyOrder(shop: string, transactionId: string) {
@@ -181,25 +253,40 @@ async function fetchShopifyOrder(shop: string, transactionId: string) {
   }
 
   if (/^\d+$/.test(orderId)) {
-    const direct = await shopifyAdminFetch(
+    const direct = await shopifyAdminGraphql(
       shop,
-      `/orders/${orderId}.json?fields=id,email,contact_email,phone,customer,billing_address,shipping_address,name`
+      `query OrderById($id: ID!) {
+        order(id: $id) {
+          ${SHOPIFY_ORDER_FIELDS}
+        }
+      }`,
+      { id: `gid://shopify/Order/${orderId}` }
     );
 
-    if (direct?.order) {
-      return direct.order;
+    if (direct?.order && typeof direct.order === "object") {
+      return direct.order as Record<string, unknown>;
     }
   }
 
-  const orderName = encodeURIComponent(orderId.startsWith("#") ? orderId : `#${orderId}`);
+  const orderName = orderId.startsWith("#") ? orderId : `#${orderId}`;
 
-  const search = await shopifyAdminFetch(
+  const search = await shopifyAdminGraphql(
     shop,
-    `/orders.json?status=any&name=${orderName}&limit=1&fields=id,email,contact_email,phone,customer,billing_address,shipping_address,name`
+    `query OrderByName($query: String!) {
+      orders(first: 1, query: $query) {
+        nodes {
+          ${SHOPIFY_ORDER_FIELDS}
+        }
+      }
+    }`,
+    { query: `name:${orderName}` }
   );
 
-  if (Array.isArray(search?.orders) && search.orders[0]) {
-    return search.orders[0];
+  const orders = search?.orders as Record<string, unknown> | undefined;
+  const nodes = orders?.nodes;
+
+  if (Array.isArray(nodes) && nodes[0] && typeof nodes[0] === "object") {
+    return nodes[0] as Record<string, unknown>;
   }
 
   return null;
@@ -207,29 +294,37 @@ async function fetchShopifyOrder(shop: string, transactionId: string) {
 
 function customerFromShopifyOrder(order: Record<string, unknown>) {
   const customer = (order.customer || {}) as Record<string, unknown>;
-  const shippingAddress = (order.shipping_address || {}) as Record<string, unknown>;
-  const billingAddress = (order.billing_address || {}) as Record<string, unknown>;
-  const address = Object.keys(shippingAddress).length ? shippingAddress : billingAddress;
+  const shippingAddress = (order.shippingAddress || {}) as Record<string, unknown>;
+  const billingAddress = (order.billingAddress || {}) as Record<string, unknown>;
+  const defaultAddress = (customer.defaultAddress || {}) as Record<string, unknown>;
+  const address = Object.keys(shippingAddress).length
+    ? shippingAddress
+    : Object.keys(billingAddress).length
+      ? billingAddress
+      : defaultAddress;
 
   return {
-    email: firstValue(order.email, order.contact_email, customer.email),
+    email: firstValue(order.email, customer.email),
     phone: firstValue(
       order.phone,
       customer.phone,
       shippingAddress.phone,
-      billingAddress.phone
+      billingAddress.phone,
+      defaultAddress.phone
     ),
     first_name: firstValue(
-      customer.first_name,
-      shippingAddress.first_name,
-      billingAddress.first_name
+      customer.firstName,
+      shippingAddress.firstName,
+      billingAddress.firstName,
+      defaultAddress.firstName
     ),
     last_name: firstValue(
-      customer.last_name,
-      shippingAddress.last_name,
-      billingAddress.last_name
+      customer.lastName,
+      shippingAddress.lastName,
+      billingAddress.lastName,
+      defaultAddress.lastName
     ),
-    customer_id: firstValue(customer.id),
+    customer_id: firstValue(customer.legacyResourceId),
     address,
   };
 }
