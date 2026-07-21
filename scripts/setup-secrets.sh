@@ -53,16 +53,6 @@ if [ ! -z "$DATABASE_URL" ]; then
     create_or_update_secret "DATABASE_URL" "$DATABASE_URL"
 fi
 
-read -p "STRIPE_SECRET_KEY: " STRIPE_SECRET_KEY
-if [ ! -z "$STRIPE_SECRET_KEY" ]; then
-    create_or_update_secret "STRIPE_SECRET_KEY" "$STRIPE_SECRET_KEY"
-fi
-
-read -p "STRIPE_WEBHOOK_SECRET: " STRIPE_WEBHOOK_SECRET
-if [ ! -z "$STRIPE_WEBHOOK_SECRET" ]; then
-    create_or_update_secret "STRIPE_WEBHOOK_SECRET" "$STRIPE_WEBHOOK_SECRET"
-fi
-
 read -p "GOOGLE_CLIENT_SECRET: " GOOGLE_CLIENT_SECRET
 if [ ! -z "$GOOGLE_CLIENT_SECRET" ]; then
     create_or_update_secret "GOOGLE_CLIENT_SECRET" "$GOOGLE_CLIENT_SECRET"
