@@ -41,6 +41,11 @@ import {
 import { getMetaBusinessPortfolios, getMetaDatasetsForBusiness } from "../services/oauth/meta.server";
 
 import { getTestModeSettings, saveTestModeSettings } from "../services/test-mode.server";
+import {
+  getShopSubscription,
+  recordPlanRedirect,
+} from "../services/subscription.server";
+import { verifyShopifyAppPricingSubscription } from "../services/shopify-app-pricing.server";
 async function withTimeout<T>(
   promise: Promise<T>,
   fallback: T,
@@ -69,7 +74,7 @@ type AssetOption = {
 };
 
 export async function loader({ request }: LoaderFunctionArgs) {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
   const savedConnections = await getWorkspaceConnections(workspace.id);
   const savedAssetSelections = await getAssetSelections(workspace.id);
@@ -77,6 +82,27 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const testModeSettings = await getTestModeSettings(workspace.id);
   const savedGa4PropertyId = savedAssetSelections["google:GA4 Property"] || "";
   const url = new URL(request.url);
+  const redirectedPlanHandle =
+    url.searchParams.get("plan_handle");
+
+  let subscriptionVerification = null;
+
+  if (redirectedPlanHandle) {
+    await recordPlanRedirect({
+      shop: session.shop,
+      shopifyPlanHandle: redirectedPlanHandle,
+    });
+
+    subscriptionVerification =
+      await verifyShopifyAppPricingSubscription({
+        shop: session.shop,
+        admin,
+      });
+  }
+
+  const subscription =
+    await getShopSubscription(session.shop);
+
   const navParams = new URLSearchParams();
   const host = url.searchParams.get("host");
   const embedded = url.searchParams.get("embedded");
@@ -287,6 +313,9 @@ id: true,
   return {
     shop: session.shop,
     navQuery: navParams.toString(),
+    subscription,
+    subscriptionVerification,
+    redirectedPlanHandle,
     shouldLoadGa4Assets,
     shouldLoadMetaAssets,
     unlockPlatform,

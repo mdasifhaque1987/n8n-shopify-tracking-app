@@ -32,19 +32,26 @@ model Session {
 }
 
 model ShopSettings {
-  id              Int        @id @default(autoincrement())
-  shop            String     @unique // e.g. "my-store.myshopify.com"
-  ga4Id           String? // G-XXXXXX
-  googleAdsId     String? // AW-XXXXXX
-  facebookPixelId String?
-  tiktokPixelId   String?
-  pinterestTagId  String?
-  linkedinPid     String?
-  bingUetTagId    String?
-  workspaceId     String? // Link to workspace
-  workspace       Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  createdAt       DateTime   @default(now())
-  updatedAt       DateTime   @updatedAt
+  id                           Int        @id @default(autoincrement())
+  shop                         String     @unique // e.g. "my-store.myshopify.com"
+  ga4Id                        String? // G-XXXXXX
+  googleAdsId                  String? // AW-XXXXXX
+  facebookPixelId              String?
+  tiktokPixelId                String?
+  pinterestTagId               String?
+  linkedinPid                  String?
+  bingUetTagId                 String?
+  workspaceId                  String? // Link to workspace
+  workspace                    Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  shopifyShopGid               String?
+  shopifyPlanHandle            String?
+  subscriptionPlan             String?
+  subscriptionStatus           String     @default("unverified")
+  subscriptionVerifiedAt       DateTime?
+  subscriptionTrialEndsAt      DateTime?
+  subscriptionCurrentPeriodEnd DateTime?
+  createdAt                    DateTime   @default(now())
+  updatedAt                    DateTime   @updatedAt
 }
 
 // User model for authentication
