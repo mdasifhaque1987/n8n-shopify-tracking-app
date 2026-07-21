@@ -3198,10 +3198,11 @@ export default function ConfigurationPage() {
           Connect or reconnect Google whenever its asset selections need to be changed.
         </p>
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <div className="dh-button-row" style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
 
           <button
             type="button"
+            className="dh-button dh-button--active"
             onClick={() => navigate(withNav("/app/delivery-logs"))}
             style={{
               display: "inline-block",
@@ -3220,6 +3221,7 @@ export default function ConfigurationPage() {
 
           <button
             type="button"
+            className="dh-button"
             onClick={() => navigate(withNav("/app/help"))}
             style={{
               display: "inline-block",

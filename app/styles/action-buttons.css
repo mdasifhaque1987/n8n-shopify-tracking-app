@@ -1,0 +1,129 @@
+.dh-button-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.dh-button {
+  appearance: none;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: auto;
+  min-height: 40px;
+  padding: 9px 16px;
+  margin: 0;
+
+  border: 1px solid #d1d5db !important;
+  border-radius: 6px !important;
+  background: #ffffff !important;
+  color: #111827 !important;
+
+  font-family: inherit;
+  font-size: 14px !important;
+  font-weight: 700 !important;
+  line-height: 20px;
+  text-align: center;
+  text-decoration: none !important;
+  white-space: nowrap;
+
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.dh-button:hover,
+.dh-button:focus-visible {
+  border-color: #15803d !important;
+  background: #16a34a !important;
+  color: #ffffff !important;
+  box-shadow: 0 4px 10px rgba(22, 163, 74, 0.2);
+  transform: translateY(-1px);
+  outline: none;
+}
+
+.dh-button:active {
+  border-color: #166534 !important;
+  background: #15803d !important;
+  color: #ffffff !important;
+  transform: translateY(0);
+}
+
+.dh-button--active {
+  border-color: #15803d !important;
+  background: #16a34a !important;
+  color: #ffffff !important;
+}
+
+.dh-button--active:hover,
+.dh-button--active:focus-visible {
+  border-color: #166534 !important;
+  background: #15803d !important;
+}
+
+.dh-button--danger {
+  border-color: #fecaca !important;
+  background: #ffffff !important;
+  color: #dc2626 !important;
+}
+
+.dh-button--danger:hover,
+.dh-button--danger:focus-visible {
+  border-color: #dc2626 !important;
+  background: #dc2626 !important;
+  color: #ffffff !important;
+}
+
+.dh-button--compact {
+  min-height: 36px;
+  padding: 7px 14px;
+}
+
+.dh-button:disabled,
+.dh-button[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.dh-platform-card {
+  display: flex !important;
+  flex-direction: column;
+  box-sizing: border-box;
+  height: 100%;
+}
+
+.dh-platform-description {
+  flex: 1;
+}
+
+.dh-platform-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: auto;
+}
+
+@media (max-width: 640px) {
+  .dh-button-row {
+    align-items: stretch;
+  }
+
+  .dh-button {
+    width: 100%;
+    min-width: 0;
+    white-space: normal;
+  }
+
+  .dh-platform-actions .dh-button {
+    width: auto;
+  }
+}

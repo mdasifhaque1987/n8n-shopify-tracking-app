@@ -2,11 +2,14 @@ import { Link, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
 import { getTestModeSettings } from "../services/test-mode.server";
+import { getShopSubscription } from "../services/subscription.server";
+import SubscriptionButton from "../components/SubscriptionButton";
 
 export async function loader({ request }) {
   const { session } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
   const testModeSettings = await getTestModeSettings(workspace.id);
+  const subscription = await getShopSubscription(session.shop);
 
   const url = new URL(request.url);
   const navParams = new URLSearchParams();
@@ -21,13 +24,14 @@ export async function loader({ request }) {
 
   return {
     testModeSettings,
+    subscription,
     shop: session.shop,
     navQuery: navParams.toString(),
   };
 }
 
 export default function HomePage() {
-  const { navQuery, testModeSettings } = useLoaderData();
+  const { navQuery, testModeSettings, subscription } = useLoaderData();
   const testModeEnabled = Boolean(testModeSettings?.enabled);
 
   const appPath = (path) => {
@@ -136,11 +140,15 @@ export default function HomePage() {
           attribution, catalog readiness, and event monitoring from one place.
         </p>
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 20 }}>
-          <Link to={appPath("/app/settings")} style={styles.primaryButton}>Open Configuration</Link>
-          <Link to={appPath("/app/connections")} style={styles.darkButton}>Platform Connections</Link>
-          <Link to={appPath("/app/delivery-logs")} style={styles.secondaryButton}>Event Delivery Logs</Link>
-          <Link to={appPath("/app/help")} style={styles.secondaryButton}>Help / Documentation</Link>
+        <div className="dh-button-row" style={{ marginTop: 20 }}>
+          <Link to={appPath("/app/settings")} className="dh-button dh-button--active">Open Configuration</Link>
+          <Link to={appPath("/app/connections")} className="dh-button">Platform Connections</Link>
+          <Link to={appPath("/app/delivery-logs")} className="dh-button">Event Delivery Logs</Link>
+          <Link to={appPath("/app/help")} className="dh-button">Help / Documentation</Link>
+          <SubscriptionButton
+            subscription={subscription}
+            to={appPath("/app/subscription")}
+          />
         </div>
       </section>
 

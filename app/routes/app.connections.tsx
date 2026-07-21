@@ -7,12 +7,15 @@ import {
   getWorkspaceConnections,
 } from "../services/platform-connection.server";
 import { getTestModeSettings } from "../services/test-mode.server";
+import { getShopSubscription } from "../services/subscription.server";
+import SubscriptionButton from "../components/SubscriptionButton";
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
   const testModeSettings = await getTestModeSettings(workspace.id);
   const savedConnections = await getWorkspaceConnections(workspace.id);
+  const subscription = await getShopSubscription(session.shop);
 
   const getStatus = (platform: string) => {
     const connection = savedConnections.find(
@@ -39,6 +42,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   return {
     testModeSettings,
+    subscription,
     shop: session.shop,
     navQuery: navParams.toString(),
     customerEnrichment: {
@@ -69,8 +73,13 @@ export async function action({ request }: ActionFunctionArgs) {
 }
 
 export default function ConnectionsPage() {
-  const { shop, connections, customerEnrichment, testModeSettings } =
-    useLoaderData<typeof loader>();
+  const {
+    shop,
+    connections,
+    customerEnrichment,
+    testModeSettings,
+    subscription,
+  } = useLoaderData<typeof loader>();
   const testModeEnabled = Boolean(testModeSettings?.enabled);
   const location = useLocation();
   const withNav = (path: string) => {
@@ -179,18 +188,23 @@ export default function ConnectionsPage() {
         Connect, reconnect, or disconnect advertising platforms used for tracking and catalog sync.
       </p>
 
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 24 }}>
-        <Link to={withNav("/app/settings")} style={styles.secondaryLink}>
+      <div className="dh-button-row" style={{ marginBottom: 24 }}>
+        <Link to={withNav("/app/settings")} className="dh-button">
           Configuration
         </Link>
 
-        <Link to={withNav("/app/delivery-logs")} style={styles.secondaryLink}>
+        <Link to={withNav("/app/delivery-logs")} className="dh-button">
           Event Delivery Logs
         </Link>
 
-        <Link to={withNav("/app/help")} style={styles.secondaryLink}>
+        <Link to={withNav("/app/help")} className="dh-button">
           Help / Documentation
         </Link>
+
+        <SubscriptionButton
+          subscription={subscription}
+          to={withNav("/app/subscription")}
+        />
       </div>
 
       <div
@@ -243,6 +257,7 @@ export default function ConnectionsPage() {
           return (
             <div
               key={platform.id}
+              className="dh-platform-card"
               style={{
                 border: "1px solid #ddd",
                 borderRadius: 8,
@@ -277,14 +292,15 @@ export default function ConnectionsPage() {
                 </div>
               </div>
 
-              <p style={{ fontSize: 14, color: "#666", marginBottom: 16 }}>
+              <p className="dh-platform-description" style={{ fontSize: 14, color: "#666", marginBottom: 16 }}>
                 {platform.description}
               </p>
 
-              <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <div className="dh-platform-actions">
                 {isConnected ? (
                   <>
                     <span
+                      className="dh-button dh-button--active dh-button--compact"
                       style={{
                         padding: "8px 16px",
                         backgroundColor: "#16a34a",
@@ -301,7 +317,7 @@ export default function ConnectionsPage() {
                       href={platform.oauthUrl}
                       target="_blank"
                       rel="noreferrer"
-                      style={styles.primaryLink}
+                      className="dh-button dh-button--compact"
                     >
                       Reconnect
                     </a>
@@ -309,7 +325,10 @@ export default function ConnectionsPage() {
                     {connection.id && (
                       <Form method="post">
                         <input type="hidden" name="connectionId" value={connection.id} />
-                        <button type="submit" style={styles.dangerButton}>
+                        <button
+                          type="submit"
+                          className="dh-button dh-button--danger dh-button--compact"
+                        >
                           Disconnect
                         </button>
                       </Form>

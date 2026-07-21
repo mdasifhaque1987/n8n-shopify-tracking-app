@@ -44,6 +44,42 @@ type PartnerSubscriptionResponse = {
   }>;
 };
 
+async function describeSubscriptionError(
+  error: unknown,
+): Promise<string> {
+  if (error instanceof Response) {
+    let responseBody = "";
+
+    try {
+      responseBody = await error.clone().text();
+    } catch {
+      responseBody = "";
+    }
+
+    const compactBody = responseBody
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 600);
+
+    const statusDescription = [
+      error.status || null,
+      error.statusText || null,
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    return compactBody
+      ? `Shopify request failed (${statusDescription || "unknown HTTP status"}): ${compactBody}`
+      : `Shopify request failed (${statusDescription || "unknown HTTP status"}).`;
+  }
+
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 async function getShopifyShopGid(
   admin: AdminGraphqlClient,
 ): Promise<string> {
@@ -303,6 +339,17 @@ export async function verifyShopifyAppPricingSubscription({
         : "The Shopify subscription is active.",
     };
   } catch (error) {
+    const message =
+      await describeSubscriptionError(error);
+
+    console.error(
+      "Shopify App Pricing verification failed",
+      {
+        shop,
+        message,
+      },
+    );
+
     await saveSubscriptionVerificationError(shop);
 
     return {
@@ -310,10 +357,7 @@ export async function verifyShopifyAppPricingSubscription({
       configured: true,
       status: "verification_error" as const,
       planHandle: null,
-      message:
-        error instanceof Error
-          ? error.message
-          : String(error),
+      message,
     };
   }
 }

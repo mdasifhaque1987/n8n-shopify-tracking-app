@@ -2,6 +2,7 @@
 
 client_id = "5e6f911a2892c8c18cd47d5e96596f80"
 name = "DH Conversions"
+handle = "dh-conversion"
 application_url = "https://tracking.datahatches.com"
 embedded = true
 

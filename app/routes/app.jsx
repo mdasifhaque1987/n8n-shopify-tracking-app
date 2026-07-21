@@ -1,3 +1,4 @@
+import "../styles/action-buttons.css";
 /* global process */
 import {
   Outlet,
@@ -40,6 +41,10 @@ export default function App() {
 
         <s-link href="/app/connections">
           Connections
+        </s-link>
+
+        <s-link href="/app/subscription">
+          My Subscription
         </s-link>
       </s-app-nav>
 
