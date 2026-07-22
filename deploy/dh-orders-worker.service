@@ -1,0 +1,23 @@
+[Unit]
+Description=DH Conversions Shopify order outbox worker
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=asif-haque
+Group=asif-haque
+WorkingDirectory=/home/asif-haque/Downloads/dh-tracking-app-new
+EnvironmentFile=/home/asif-haque/Downloads/dh-tracking-app-new/.env
+Environment=NODE_ENV=production
+ExecStart=/usr/bin/node /home/asif-haque/Downloads/dh-tracking-app-new/build/worker/order-webhook-worker.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

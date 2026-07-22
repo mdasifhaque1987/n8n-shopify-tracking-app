@@ -146,43 +146,10 @@ function getAppProxyTrackUrls(payload) {
   return [APP_PROXY_TRACK_URL];
 }
 
-function isMetaCheckoutFallbackEvent(payload) {
-  return (
-    payload &&
-    (
-      payload.meta_event === "AddPaymentInfo" ||
-      payload.meta_event === "AddShippingInfo"
-    )
-  );
-}
-
-async function sendToServerTextFallback(payload) {
+async function sendToServer(payload, ingestKey) {
   try {
-    await fetch(TRACK_URL, {
-      method: "POST",
-      mode: "no-cors",
-      keepalive: true,
-      headers: {
-        "Content-Type": "text/plain;charset=UTF-8",
-      },
-      body: JSON.stringify({
-        ...payload,
-        transport: "text_plain_checkout_fallback",
-      }),
-    });
+    if (!ingestKey) return false;
 
-    DH_PIXEL_DEBUG && console.log(
-      "[DH Tracking Pixel] checkout fallback server send attempted",
-      payload.meta_event,
-      payload.event_id
-    );
-  } catch (e) {
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] checkout fallback send error", e);
-  }
-}
-
-async function sendToServer(payload) {
-  try {
     const body = JSON.stringify(payload);
     const appProxyUrls = getAppProxyTrackUrls(payload);
 
@@ -195,7 +162,10 @@ async function sendToServer(payload) {
       try {
         const response = await fetch(endpoint, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + ingestKey,
+          },
           keepalive: true,
           body,
         });
@@ -951,13 +921,6 @@ async function buildPayload(event, config, browser) {
   const metaContents = buildMetaContents(items, metaContentIdFormat);
   const metaContentIds = metaContents.map((item) => item.id).filter(Boolean);
   const gaIdentity = await getGaIdentity(browser, event);
-
-  DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA identity", {
-    pixelVersion: DH_PIXEL_VERSION,
-    clientId: gaIdentity.clientId,
-    sessionId: gaIdentity.sessionId,
-    shopifyClientId: gaIdentity.shopifyClientId,
-  });
 
   return {
     event_id: event.id,
@@ -1834,7 +1797,7 @@ function sendToMetaPixel(payload, config) {
   }
 }
 
-register(({ analytics, browser }) => {
+register(({ analytics, browser, settings }) => {
   DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] loaded", DH_PIXEL_VERSION, "with GA4 client sender");
 
   [
@@ -1853,11 +1816,15 @@ register(({ analytics, browser }) => {
   ].forEach((eventName) => {
     analytics.subscribe(eventName, async (event) => {
       try {
-        const shop = getShop(event);
+        const shop =
+          (settings && settings.shop_domain) ||
+          getShop(event);
         const config = await getConfig(shop);
-        const payload = await buildPayload(event, config, browser);
+        const payload = {
+          ...(await buildPayload(event, config, browser)),
+          shop,
+        };
 
-        DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel]", eventName, payload);
         DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] config snapshot", {
           pixelVersion: DH_PIXEL_VERSION,
           ga4: config && config.ga4 ? config.ga4 : null,
@@ -1902,26 +1869,10 @@ register(({ analytics, browser }) => {
             clientDeliveries,
         };
 
-        const serverSendPromise =
-          sendToServer(serverPayload);
-
-        const serverSent =
-          await serverSendPromise;
-
-        if (
-          !serverSent &&
-          isMetaCheckoutFallbackEvent(payload)
-        ) {
-          DH_PIXEL_DEBUG && console.log(
-            "[DH Tracking Pixel] primary checkout send failed; trying text fallback",
-            payload.meta_event,
-            payload.event_id
-          );
-
-          await sendToServerTextFallback(
-            serverPayload
-          );
-        }
+        await sendToServer(
+          serverPayload,
+          settings && settings.ingest_key
+        );
       } catch (e) {
         DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel Error]", eventName, e);
       }

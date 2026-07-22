@@ -339,20 +339,26 @@ export async function dispatchToMeta(
       },
     };
   } catch (error: any) {
-    const responseData = error?.response?.data || null;
-    const message =
-      responseData?.error?.message ||
-      error?.message ||
-      "Unknown Meta CAPI error";
-
-    console.error("Meta CAPI dispatch error:", responseData || error);
+    const responseStatus = Number(error?.response?.status || 0) || null;
+    const message = responseStatus
+      ? `Meta CAPI request failed with HTTP ${responseStatus}.`
+      : error?.code === "ECONNABORTED"
+        ? "Meta CAPI request timed out."
+        : "Meta CAPI network request failed.";
 
     return {
       success: false,
       status: "failed",
       message: `Meta CAPI failed: ${message}`,
       responsePayload: {
-        error: responseData || message,
+        statusCode: responseStatus,
+        errorCategory: responseStatus === 429
+          ? "rate_limited"
+          : responseStatus && responseStatus >= 500
+            ? "service_unavailable"
+            : responseStatus
+              ? "api_rejected"
+              : "network_or_timeout",
       },
     };
   }

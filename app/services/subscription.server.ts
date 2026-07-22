@@ -13,6 +13,107 @@ export type StoredSubscriptionStatus =
   | "unknown_plan"
   | "verification_error";
 
+export type SubscriptionEntitlements = {
+  canonicalPlan: "core-starter" | "core-server";
+  subscriptionVerified: boolean;
+  googleClientSide: boolean;
+  metaClientSide: boolean;
+  googleAdsServerSide: boolean;
+  ga4ServerSide: boolean;
+  metaCapi: boolean;
+};
+
+const LEAST_PRIVILEGED_ENTITLEMENTS: SubscriptionEntitlements = {
+  canonicalPlan: "core-starter",
+  subscriptionVerified: false,
+  googleClientSide: true,
+  metaClientSide: true,
+  googleAdsServerSide: false,
+  ga4ServerSide: false,
+  metaCapi: false,
+};
+
+export function resolveSubscriptionEntitlements(input: {
+  subscriptionPlan?: string | null;
+  subscriptionStatus?: string | null;
+}): SubscriptionEntitlements {
+  const canonicalPlan = normalizeShopifyPlanHandle(input.subscriptionPlan);
+  const subscriptionVerified =
+    input.subscriptionStatus === "active" || input.subscriptionStatus === "trial";
+
+  if (!subscriptionVerified || canonicalPlan !== "core-server") {
+    return {
+      ...LEAST_PRIVILEGED_ENTITLEMENTS,
+      subscriptionVerified,
+    };
+  }
+
+  return {
+    canonicalPlan: "core-server",
+    subscriptionVerified: true,
+    googleClientSide: true,
+    metaClientSide: true,
+    googleAdsServerSide: true,
+    ga4ServerSide: true,
+    metaCapi: true,
+  };
+}
+
+export async function getShopEntitlements(
+  shop: string,
+): Promise<SubscriptionEntitlements> {
+  const settings = await db.shopSettings.findUnique({
+    where: { shop },
+    select: {
+      subscriptionPlan: true,
+      subscriptionStatus: true,
+    },
+  });
+
+  return resolveSubscriptionEntitlements({
+    subscriptionPlan: settings?.subscriptionPlan,
+    subscriptionStatus: settings?.subscriptionStatus,
+  });
+}
+
+export async function removeServerSideSettings(shop: string): Promise<void> {
+  const settings = await db.shopSettings.findUnique({
+    where: { shop },
+    select: { workspaceId: true },
+  });
+
+  if (!settings?.workspaceId) return;
+
+  await db.$transaction([
+    db.platformDeliverySetting.updateMany({
+      where: { workspaceId: settings.workspaceId, serverSideEnabled: true },
+      data: {
+        serverSideEnabled: false,
+        clientSideEnabled: true,
+        deliveryMode: "client",
+      },
+    }),
+    db.shopAssetSelection.updateMany({
+      where: {
+        workspaceId: settings.workspaceId,
+        OR: [
+          { assetType: { endsWith: ":server_side" }, assetValue: "true" },
+          {
+            platform: "meta",
+            assetType: "Meta Server Side Enabled",
+            assetValue: "true",
+          },
+        ],
+      },
+      data: { assetValue: "false", assetLabel: "Disabled" },
+    }),
+    db.googleAdsConversionAction.updateMany({
+      where: { workspaceId: settings.workspaceId, deliveryMode: "server" },
+      data: { deliveryMode: "client" },
+    }),
+  ]);
+}
+
 type RecordPlanRedirectInput = {
   shop: string;
   shopifyPlanHandle: string;
@@ -75,7 +176,7 @@ export async function saveVerifiedSubscription({
         : "unknown_plan"
       : "inactive";
 
-  return db.shopSettings.upsert({
+  const savedSubscription = await db.shopSettings.upsert({
     where: {
       shop,
     },
@@ -99,6 +200,17 @@ export async function saveVerifiedSubscription({
       subscriptionCurrentPeriodEnd: currentPeriodEnd,
     },
   });
+
+  const entitlements = resolveSubscriptionEntitlements({
+    subscriptionPlan,
+    subscriptionStatus: safeStatus,
+  });
+
+  if (!entitlements.googleAdsServerSide) {
+    await removeServerSideSettings(shop);
+  }
+
+  return savedSubscription;
 }
 
 export async function saveSubscriptionVerificationError(

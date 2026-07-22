@@ -1,8 +1,13 @@
-import { Link, useLoaderData } from "react-router";
+import { Form, Link, useActionData, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
+import { getOrCreateShopWorkspace } from "../services/workspace.server";
+import {
+  getEventIngestPixelStatus,
+  rotateEventIngestPixelCredential,
+} from "../services/shopify-web-pixel.server";
 
 export const loader = async ({ request }) => {
-  const { session } = await authenticate.admin(request);
+  const { session, admin } = await authenticate.admin(request);
   const url = new URL(request.url);
 
   const shopHandle = session.shop.replace(".myshopify.com", "");
@@ -18,15 +23,22 @@ export const loader = async ({ request }) => {
     }
   }
 
+  const pixelStatus = await getEventIngestPixelStatus(session.shop, admin);
+
   return {
     ok: true,
     shop: session.shop,
     shopHandle,
     navQuery: params.toString(),
     title: "Web Pixel Status",
-    status: "Connected in Shopify",
+    status: pixelStatus.ingestKeyConfigured
+      ? "Event ingestion key active"
+      : "Pixel refresh required",
+    ingestKeyConfigured: pixelStatus.ingestKeyConfigured,
     message:
-      "DH Conversions Web Pixel is managed from Shopify Customer Events. Your Shopify app details page shows Pixels: Connected, so this dashboard no longer needs to run webPixelCreate manually.",
+      pixelStatus.ingestKeyConfigured
+        ? "This pixel has a public write-only installation key for tenant routing and rate-limit partitioning. It does not prove that telemetry came from Shopify. Rotating it revokes the previous key."
+        : "Refresh the Shopify web pixel to add its public write-only installation key. Client telemetry is rejected until this is completed.",
     nextSteps: [
       "Use Shopify Admin → Settings → Customer events to review the app pixel connection.",
       "Use the app Configuration page to manage Meta, GA4, Google Ads, and server-side settings.",
@@ -35,8 +47,29 @@ export const loader = async ({ request }) => {
   };
 };
 
+export const action = async ({ request }) => {
+  const { session, admin } = await authenticate.admin(request);
+  const workspace = await getOrCreateShopWorkspace(session.shop);
+
+  try {
+    const result = await rotateEventIngestPixelCredential({
+      shop: session.shop,
+      workspaceId: workspace.id,
+      admin,
+    });
+
+    return { ok: true, message: result.created ? "Web pixel and installation key created." : "Public installation key rotated." };
+  } catch (error) {
+    return Response.json(
+      { ok: false, message: error instanceof Error ? error.message : "Pixel update failed." },
+      { status: 500 },
+    );
+  }
+};
+
 export default function ActivatePixel() {
   const data = useLoaderData();
+  const actionData = useActionData();
 
   const appPath = (path) => {
     if (!data.navQuery) {
@@ -51,11 +84,26 @@ export default function ActivatePixel() {
       <div style={styles.card}>
         <h1 style={styles.title}>{data.title}</h1>
 
-        <div style={{ ...styles.status, ...styles.success }}>
+        <div
+          style={{
+            ...styles.status,
+            ...(data.ingestKeyConfigured ? styles.success : styles.warning),
+          }}
+        >
           {data.status}
         </div>
 
         <p style={styles.text}>{data.message}</p>
+
+        {actionData?.message ? (
+          <p style={styles.text}>{actionData.message}</p>
+        ) : null}
+
+        <Form method="post">
+          <button type="submit" style={styles.primaryLink}>
+            {data.ingestKeyConfigured ? "Rotate installation key" : "Refresh web pixel"}
+          </button>
+        </Form>
 
         <div style={styles.stepsBox}>
           <h3 style={styles.smallHeading}>Next steps</h3>
@@ -128,6 +176,11 @@ const styles = {
     backgroundColor: "#dcfce7",
     color: "#166534",
     border: "1px solid #bbf7d0",
+  },
+  warning: {
+    backgroundColor: "#fef3c7",
+    color: "#92400e",
+    border: "1px solid #fde68a",
   },
   smallHeading: {
     margin: "0 0 8px",

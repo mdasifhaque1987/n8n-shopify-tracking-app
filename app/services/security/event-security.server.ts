@@ -205,16 +205,6 @@ function getClientIp(request: Request): string {
   );
 }
 
-function getRateLimitKey(request: Request, payload: Record<string, unknown>) {
-  const ip = getClientIp(request);
-
-  const shop =
-    firstString(payload, ["shop", "shopDomain", "shop_domain", "context.shop"]) ||
-    "unknown-shop";
-
-  return `${ip}:${shop}`;
-}
-
 function checkPayloadSize(request: Request): SecurityFail | null {
   const maxPayloadBytes = numberFromEnv(
     "EVENT_MAX_PAYLOAD_BYTES",
@@ -230,17 +220,8 @@ function checkPayloadSize(request: Request): SecurityFail | null {
   return null;
 }
 
-function checkRateLimit(
-  request: Request,
-  payload: Record<string, unknown>,
-): SecurityFail | null {
-  const rateLimit = numberFromEnv(
-    "EVENT_RATE_LIMIT_PER_MINUTE",
-    DEFAULT_RATE_LIMIT_PER_MINUTE,
-  );
-
+function checkRateLimitKey(key: string, rateLimit: number): SecurityFail | null {
   const now = Date.now();
-  const key = getRateLimitKey(request, payload);
   const existing = rateBuckets.get(key);
 
   if (!existing || existing.resetAt <= now) {
@@ -263,6 +244,63 @@ function checkRateLimit(
     return fail("Too many tracking requests. Please retry later.", 429, {
       "retry-after": String(retryAfterSeconds),
     });
+  }
+
+  return null;
+}
+
+function checkUnauthenticatedRateLimit(request: Request): SecurityFail | null {
+  return checkRateLimitKey(
+    `preauth:${getClientIp(request)}`,
+    numberFromEnv(
+      "EVENT_PREAUTH_RATE_LIMIT_PER_MINUTE",
+      DEFAULT_RATE_LIMIT_PER_MINUTE,
+    ),
+  );
+}
+
+export function applyInstallationEventRateLimit(
+  request: Request,
+  installationId: number,
+): Response | null {
+  const result = checkRateLimitKey(
+    `installation:${installationId}:${getClientIp(request)}`,
+    numberFromEnv(
+      "EVENT_AUTHENTICATED_RATE_LIMIT_PER_MINUTE",
+      DEFAULT_RATE_LIMIT_PER_MINUTE,
+    ),
+  );
+
+  return result?.response || null;
+}
+
+function checkEventId(payload: Record<string, unknown>): SecurityFail | null {
+  const eventId = firstString(payload, ["event_id", "eventId", "id"]);
+
+  if (!eventId || eventId.length > 255 || !/^[A-Za-z0-9:_-]+$/.test(eventId)) {
+    return fail("Tracking event ID is missing or invalid.", 400);
+  }
+
+  return null;
+}
+
+function checkEventTimestamp(payload: Record<string, unknown>): SecurityFail | null {
+  const raw = getPath(payload, "event_time") ?? getPath(payload, "eventTime") ?? getPath(payload, "timestamp");
+  const numeric = typeof raw === "number" ? raw : Number(raw);
+  const parsedMs = Number.isFinite(numeric)
+    ? numeric > 10_000_000_000 ? numeric : numeric * 1000
+    : typeof raw === "string" ? Date.parse(raw) : Number.NaN;
+
+  if (!Number.isFinite(parsedMs)) {
+    return fail("Tracking event timestamp is missing or invalid.", 400);
+  }
+
+  const now = Date.now();
+  const maxAgeMs = numberFromEnv("EVENT_MAX_AGE_SECONDS", 30 * 60) * 1000;
+  const maxFutureMs = numberFromEnv("EVENT_MAX_FUTURE_SECONDS", 5 * 60) * 1000;
+
+  if (parsedMs < now - maxAgeMs || parsedMs > now + maxFutureMs) {
+    return fail("Tracking event timestamp is outside the accepted window.", 400);
   }
 
   return null;
@@ -427,7 +465,16 @@ export async function applyEventSecurityPrecheck(
   request: Request,
   payload: unknown,
 ): Promise<SecurityResult> {
-  if (process.env.EVENT_SECURITY_PRECHECK_DISABLED === "true") {
+  const rateLimitCheck = checkUnauthenticatedRateLimit(request);
+
+  if (rateLimitCheck) {
+    return rateLimitCheck;
+  }
+
+  if (
+    process.env.EVENT_SECURITY_PRECHECK_DISABLED === "true" &&
+    process.env.NODE_ENV !== "production"
+  ) {
     return {
       ok: true,
       payload: isRecord(payload) ? payload : {},
@@ -458,16 +505,18 @@ export async function applyEventSecurityPrecheck(
     return fail(`Tracking event is not allowed: ${eventName}`, 400);
   }
 
+  const eventIdCheck = checkEventId(payload);
+
+  if (eventIdCheck) return eventIdCheck;
+
+  const timestampCheck = checkEventTimestamp(payload);
+
+  if (timestampCheck) return timestampCheck;
+
   const shopCheck = checkShopValue(payload);
 
   if (shopCheck) {
     return shopCheck;
-  }
-
-  const rateLimitCheck = checkRateLimit(request, payload);
-
-  if (rateLimitCheck) {
-    return rateLimitCheck;
   }
 
   const purchaseCheck = checkPurchasePayload(payload);

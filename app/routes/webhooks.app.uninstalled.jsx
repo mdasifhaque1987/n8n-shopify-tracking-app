@@ -20,6 +20,11 @@ export const action = async ({ request }) => {
     where: { shop },
   });
 
+  await db.shopSettings.updateMany({
+    where: { shop },
+    data: { eventIngestKeyHash: null },
+  });
+
   return new Response(null, {
     status: 200,
   });

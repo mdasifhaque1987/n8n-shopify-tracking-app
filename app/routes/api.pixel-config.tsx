@@ -4,6 +4,7 @@ import { getShopSettings } from "../models/shop-settings.server";
 import { getGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
 import { getAssetSelections } from "../services/asset-selection.server";
 import { getTestModeSettings } from "../services/test-mode.server";
+import { getShopEntitlements } from "../services/subscription.server";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -35,6 +36,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   const settings = await getShopSettings(shop);
+  const entitlements = await getShopEntitlements(shop);
 
   let ga4MeasurementId = settings?.ga4Id || null;
   let ga4DeliveryMode = "client";
@@ -71,7 +73,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
     if (ga4DeliverySettings.setting?.isActive) {
       ga4DeliveryMode = ga4DeliverySettings.setting.deliveryMode || "client";
       ga4ClientSideEnabled = Boolean(ga4DeliverySettings.setting.clientSideEnabled);
-      ga4ServerSideEnabled = Boolean(ga4DeliverySettings.setting.serverSideEnabled);
+      ga4ServerSideEnabled = Boolean(
+        entitlements.ga4ServerSide && ga4DeliverySettings.setting.serverSideEnabled
+      );
     }
 
     if (ga4DeliverySettings.credential?.assetId) {
@@ -120,7 +124,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
       datasetId: metaDatasetId || null,
       pixelId: metaDatasetId || null,
       clientSideEnabled: metaClientSideEnabled,
-      serverSideEnabled: Boolean(metaServerSideEnabled && metaCapiAccessTokenConfigured),
+      serverSideEnabled: Boolean(
+        entitlements.metaCapi && metaServerSideEnabled && metaCapiAccessTokenConfigured
+      ),
       selectedEvents: metaSelectedEvents,
       testEventCode: metaTestEventCode === "none" ? "" : metaTestEventCode,
       contentIdFormat: metaContentIdFormat,

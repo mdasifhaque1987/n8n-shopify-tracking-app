@@ -68,6 +68,7 @@ export async function redactCustomerData(
       shop,
       orderIdsReceived: orderIds.length,
       deliveryLogsDeleted: 0,
+      orderJobsDeleted: 0,
     };
   }
 
@@ -156,6 +157,8 @@ export async function redactShopData(shopInput: unknown) {
       where: deliveryLogWhere,
     });
 
+    const orderJobs = await tx.shopifyOrderJob.deleteMany({ where: { shop } });
+
     const sessions = await tx.session.deleteMany({
       where: { shop },
     });
@@ -217,6 +220,7 @@ export async function redactShopData(shopInput: unknown) {
       sessionsDeleted: sessions.count,
       settingsDeleted: shopSettings.count,
       deliveryLogsDeleted: deliveryLogs.count,
+      orderJobsDeleted: orderJobs.count,
       oauthStatesDeleted,
       workspaceDeleted,
       ownerDeleted,

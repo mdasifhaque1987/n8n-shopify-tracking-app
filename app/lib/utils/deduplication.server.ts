@@ -2,6 +2,7 @@
 interface DeduplicationStore {
   has(dedupId: string): Promise<boolean>;
   add(dedupId: string, ttl: number): Promise<void>;
+  claim(dedupId: string, ttl: number): boolean;
 }
 
 class InMemoryDeduplicationStore implements DeduplicationStore {
@@ -23,6 +24,16 @@ class InMemoryDeduplicationStore implements DeduplicationStore {
   async add(dedupId: string, ttl: number): Promise<void> {
     const expiry = Date.now() + ttl;
     this.store.set(dedupId, expiry);
+  }
+
+  claim(dedupId: string, ttl: number): boolean {
+    const now = Date.now();
+    const expiry = this.store.get(dedupId);
+
+    if (expiry && expiry > now) return false;
+
+    this.store.set(dedupId, now + ttl);
+    return true;
   }
   
   // Clean up expired entries periodically
@@ -53,4 +64,8 @@ export async function isDuplicateEvent(dedupId: string): Promise<boolean> {
  */
 export async function markEventProcessed(dedupId: string): Promise<void> {
   await deduplicationStore.add(dedupId, 24 * 60 * 60 * 1000);
+}
+
+export async function claimEventProcessing(dedupId: string): Promise<boolean> {
+  return deduplicationStore.claim(dedupId, 24 * 60 * 60 * 1000);
 }

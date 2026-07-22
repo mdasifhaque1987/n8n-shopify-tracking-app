@@ -44,23 +44,46 @@ type PartnerSubscriptionResponse = {
   }>;
 };
 
+class SubscriptionVerificationFailure extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+    readonly category: string,
+  ) {
+    super(message);
+    this.name = "SubscriptionVerificationFailure";
+  }
+}
+
+function classifySubscriptionError(error: unknown) {
+  if (error instanceof SubscriptionVerificationFailure) {
+    return { retryable: error.retryable, category: error.category };
+  }
+
+  const name = error && typeof error === "object" && "name" in error
+    ? String(error.name)
+    : "";
+
+  if (name === "AbortError") return { retryable: true, category: "subscription_timeout" };
+  if (error instanceof TypeError) return { retryable: true, category: "subscription_network" };
+  if (error instanceof Response) {
+    return {
+      retryable: error.status === 429 || error.status >= 500,
+      category: error.status === 429
+        ? "subscription_rate_limited"
+        : error.status >= 500
+          ? "subscription_service_unavailable"
+          : "subscription_rejected",
+    };
+  }
+
+  return { retryable: true, category: "subscription_unavailable" };
+}
+
 async function describeSubscriptionError(
   error: unknown,
 ): Promise<string> {
   if (error instanceof Response) {
-    let responseBody = "";
-
-    try {
-      responseBody = await error.clone().text();
-    } catch {
-      responseBody = "";
-    }
-
-    const compactBody = responseBody
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 600);
-
     const statusDescription = [
       error.status || null,
       error.statusText || null,
@@ -68,9 +91,7 @@ async function describeSubscriptionError(
       .filter(Boolean)
       .join(" ");
 
-    return compactBody
-      ? `Shopify request failed (${statusDescription || "unknown HTTP status"}): ${compactBody}`
-      : `Shopify request failed (${statusDescription || "unknown HTTP status"}).`;
+    return `Shopify request failed (${statusDescription || "unknown HTTP status"}).`;
   }
 
   if (error instanceof Error) {
@@ -225,8 +246,14 @@ async function queryActiveSubscription(
       (await response.json()) as PartnerSubscriptionResponse;
 
     if (!response.ok) {
-      throw new Error(
+      throw new SubscriptionVerificationFailure(
         `Partner API request failed with HTTP ${response.status}.`,
+        response.status === 429 || response.status >= 500,
+        response.status === 429
+          ? "subscription_rate_limited"
+          : response.status >= 500
+            ? "subscription_service_unavailable"
+            : "subscription_rejected",
       );
     }
 
@@ -261,6 +288,8 @@ export async function verifyShopifyAppPricingSubscription({
       status: "pending_verification" as const,
       message:
         "Partner API credentials are not configured yet.",
+      retryable: false,
+      errorCategory: "subscription_verifier_not_configured",
     };
   }
 
@@ -292,6 +321,8 @@ export async function verifyShopifyAppPricingSubscription({
         planHandle: null,
         message:
           "No active Shopify App Pricing subscription was found.",
+        retryable: false,
+        errorCategory: null,
       };
     }
 
@@ -337,8 +368,11 @@ export async function verifyShopifyAppPricingSubscription({
       message: isTrial
         ? "The Shopify subscription trial is active."
         : "The Shopify subscription is active.",
+      retryable: false,
+      errorCategory: null,
     };
   } catch (error) {
+    const classification = classifySubscriptionError(error);
     const message =
       await describeSubscriptionError(error);
 
@@ -350,7 +384,9 @@ export async function verifyShopifyAppPricingSubscription({
       },
     );
 
-    await saveSubscriptionVerificationError(shop);
+    if (!classification.retryable) {
+      await saveSubscriptionVerificationError(shop);
+    }
 
     return {
       ok: false,
@@ -358,6 +394,8 @@ export async function verifyShopifyAppPricingSubscription({
       status: "verification_error" as const,
       planHandle: null,
       message,
+      retryable: classification.retryable,
+      errorCategory: classification.category,
     };
   }
 }

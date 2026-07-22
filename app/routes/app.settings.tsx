@@ -42,8 +42,10 @@ import { getMetaBusinessPortfolios, getMetaDatasetsForBusiness } from "../servic
 
 import { getTestModeSettings, saveTestModeSettings } from "../services/test-mode.server";
 import {
+  getShopEntitlements,
   getShopSubscription,
   recordPlanRedirect,
+  removeServerSideSettings,
 } from "../services/subscription.server";
 import { verifyShopifyAppPricingSubscription } from "../services/shopify-app-pricing.server";
 async function withTimeout<T>(
@@ -339,9 +341,31 @@ id: true,
 export async function action({ request }: ActionFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
   const workspace = await getOrCreateShopWorkspace(session.shop);
+  const entitlements = await getShopEntitlements(session.shop);
 
   const formData = await request.formData();
   const actionType = String(formData.get("_action") || "");
+  const entitlementError =
+    "Your Core Starter plan includes client-side tracking only. Upgrade to Core Server to enable GA4 server-side, Google Ads server-side, or Meta CAPI delivery.";
+
+  const requestedServerSide =
+    (actionType === "save_asset_selection" &&
+      String(formData.get("assetType") || "").endsWith(":server_side") &&
+      String(formData.get("assetValue") || "") === "true") ||
+    (actionType === "save_meta_dataset_settings" &&
+      String(formData.get("serverSideEnabled") || "") === "true") ||
+    (actionType === "save_ga4_delivery_settings" &&
+      String(formData.get("deliveryMode") || "") === "server") ||
+    (actionType === "save_google_conversions" &&
+      String(formData.get("deliveryMode") || "") === "server");
+
+  if (!entitlements.googleAdsServerSide) {
+    await removeServerSideSettings(session.shop);
+
+    if (requestedServerSide) {
+      return Response.json({ ok: false, error: entitlementError }, { status: 403 });
+    }
+  }
 
   if (actionType === "save_test_mode") {
     const enabled = String(formData.get("enabled") || "") === "true";

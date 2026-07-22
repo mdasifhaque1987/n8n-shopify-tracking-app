@@ -25,6 +25,10 @@ uri = "/webhooks/app/uninstalled"
 topics = ["app/scopes_update"]
 uri = "/webhooks/app/scopes_update"
 
+[[webhooks.subscriptions]]
+topics = ["orders/create"]
+uri = "/webhooks/orders-create"
+
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_customer_events,read_customers,read_inventory,read_locations,read_markets,read_orders,read_product_listings,read_products,write_pixels,write_app_proxy,read_pixels"

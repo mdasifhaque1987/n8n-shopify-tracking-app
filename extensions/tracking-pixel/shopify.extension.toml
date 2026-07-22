@@ -18,3 +18,8 @@ type = "object"
 name = "Shop Domain"
 description = "Your shop domain"
 type = "single_line_text_field"
+
+[settings.fields.ingest_key]
+name = "Event ingestion key"
+description = "Public write-only installation key managed by DH Conversions"
+type = "single_line_text_field"
