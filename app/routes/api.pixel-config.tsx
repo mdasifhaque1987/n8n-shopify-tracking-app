@@ -3,7 +3,6 @@ import db from "../db.server";
 import { getShopSettings } from "../models/shop-settings.server";
 import { getGa4DeliverySettings } from "../services/ga4-delivery-settings.server";
 import { getAssetSelections } from "../services/asset-selection.server";
-import { getTestModeSettings } from "../services/test-mode.server";
 import { getShopEntitlements } from "../services/subscription.server";
 
 const corsHeaders = {
@@ -42,9 +41,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   let ga4DeliveryMode = "client";
   let ga4ClientSideEnabled = Boolean(ga4MeasurementId);
   let ga4ServerSideEnabled = false;
-  let testModeEnabled = false;
-  let ga4ClientTestMode = false;
-  let metaPixelTestMode = false;
+  let ga4DebugEnabled = false;
+  let ga4ItemIdFormat =
+    "shopify_country_product_variant";
 
   const googleAdsConversions: Record<string, unknown> = {};
   const googleAdsMissingLabels: string[] = [];
@@ -68,11 +67,16 @@ export async function loader({ request }: LoaderFunctionArgs) {
   };
 
   if (settings?.workspaceId) {
-    const ga4DeliverySettings = await getGa4DeliverySettings(settings.workspaceId);
-    const testModeSettings = await getTestModeSettings(settings.workspaceId);
-    testModeEnabled = Boolean(testModeSettings?.enabled);
-    ga4ClientTestMode = Boolean(testModeSettings.channels.ga4_client.effective.enabled);
-    metaPixelTestMode = Boolean(testModeSettings.channels.meta_pixel.effective.enabled);
+    const ga4DeliverySettings =
+      await getGa4DeliverySettings(
+        settings.workspaceId,
+      );
+
+    ga4DebugEnabled =
+      ga4DeliverySettings
+        .setting
+        ?.testCode ===
+      "debug_view";
 
     if (ga4DeliverySettings.setting?.isActive) {
       ga4DeliveryMode = ga4DeliverySettings.setting.deliveryMode || "client";
@@ -86,7 +90,19 @@ export async function loader({ request }: LoaderFunctionArgs) {
       ga4MeasurementId = ga4DeliverySettings.credential.assetId;
     }
 
-    const selectedAssets = await getAssetSelections(settings.workspaceId);
+    const selectedAssets =
+      await getAssetSelections(
+        settings.workspaceId,
+      );
+
+    ga4ItemIdFormat =
+      String(
+        selectedAssets[
+          "google:GA4 Property:item_id_format"
+        ] ||
+        "shopify_country_product_variant",
+      ).trim() ||
+      "shopify_country_product_variant";
 
     const metaDatasetId = String(
       selectedAssets["meta:Meta Dataset / Pixel"] || ""
@@ -131,7 +147,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       testEventCodeConfigured: Boolean(selectedAssets["meta:Meta Test Event Code"] && selectedAssets["meta:Meta Test Event Code"] !== "none"),
       contentIdFormat: metaContentIdFormat,
       capiAccessTokenConfigured: metaCapiAccessTokenConfigured,
-      testMode: metaPixelTestMode,
+      testMode: false,
     };
 
     const selectedGoogleAdsCustomerId =
@@ -247,14 +263,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
   return Response.json(
     {
-      testMode: testModeEnabled,
+      testMode: false,
       ga4: {
         enabled: Boolean(ga4MeasurementId) && ga4DeliveryMode === "client" && ga4ClientSideEnabled,
         measurementId: ga4MeasurementId,
         deliveryMode: ga4DeliveryMode,
         clientSideEnabled: ga4ClientSideEnabled,
-        serverSideEnabled: ga4ServerSideEnabled,
-        testMode: ga4ClientTestMode,
+        serverSideEnabled:
+          ga4ServerSideEnabled,
+        debugMode:
+          ga4DebugEnabled,
+        itemIdFormat:
+          ga4ItemIdFormat,
       },
       googleAds: {
         enabled: Object.keys(googleAdsConversions).length > 0,

@@ -6,7 +6,6 @@ import {
 import { decryptToken, encryptToken } from "../lib/encryption.server";
 import { getAssetSelections } from "./asset-selection.server";
 import { getGa4DeliverySettings } from "./ga4-delivery-settings.server";
-import { getTestModeSettings } from "./test-mode.server";
 
 type AdminGraphql = {
   graphql(
@@ -121,16 +120,43 @@ export async function buildPublicWebPixelSettings(input: {
   let metaEnabled = Boolean(metaPixelId);
   let metaEvents: string[] = [];
   let googleAdsConversions: Array<Record<string, unknown>> = [];
-  let testModeSettings: Record<string, unknown> = { enabled: false, channels: {} };
+  let ga4DebugEnabled = false;
+  let ga4ItemIdFormat =
+    "shopify_country_product_variant";
 
   if (shopSettings?.workspaceId) {
-    const [ga4, assets, testMode] = await Promise.all([
-      getGa4DeliverySettings(shopSettings.workspaceId),
-      getAssetSelections(shopSettings.workspaceId),
-      getTestModeSettings(shopSettings.workspaceId),
+    const [ga4, assets] = await Promise.all([
+      getGa4DeliverySettings(
+        shopSettings.workspaceId,
+      ),
+      getAssetSelections(
+        shopSettings.workspaceId,
+      ),
     ]);
     ga4MeasurementId = ga4.credential?.assetId || ga4MeasurementId;
-    ga4Enabled = Boolean(ga4MeasurementId && ga4.setting?.clientSideEnabled && ga4.setting?.deliveryMode !== "server");
+    ga4Enabled = Boolean(
+      ga4MeasurementId &&
+      ga4.setting?.isActive &&
+      ga4.setting
+        ?.deliveryMode ===
+        "client" &&
+      ga4.setting
+        ?.clientSideEnabled ===
+        true
+    );
+
+    ga4DebugEnabled =
+      ga4.setting?.testCode ===
+      "debug_view";
+
+    ga4ItemIdFormat =
+      String(
+        assets[
+          "google:GA4 Property:item_id_format"
+        ] ||
+        "shopify_country_product_variant",
+      ).trim() ||
+      "shopify_country_product_variant";
     metaPixelId = String(assets["meta:Meta Dataset / Pixel"] || metaPixelId).trim();
     metaEnabled = Boolean(metaPixelId && String(assets["meta:Meta Client Side Enabled"] || "false") === "true");
     const rawEvents = String(assets["meta:Meta Selected Events"] || "");
@@ -139,10 +165,6 @@ export async function buildPublicWebPixelSettings(input: {
       where: { workspaceId: shopSettings.workspaceId, isActive: true, deliveryMode: "client" },
       select: { eventName: true, conversionName: true, conversionId: true, conversionLabel: true, conversionActionId: true },
     });
-    testModeSettings = {
-      enabled: testMode.enabled,
-      channels: Object.fromEntries(Object.entries(testMode.channels).map(([channel, value]) => [channel, (value as { effective: unknown }).effective])),
-    };
   }
 
   return {
@@ -151,10 +173,15 @@ export async function buildPublicWebPixelSettings(input: {
     ingestion_endpoint: INGESTION_ENDPOINT,
     ga4_enabled: String(ga4Enabled),
     ga4_measurement_id: ga4MeasurementId,
+    ga4_debug_enabled:
+      String(
+        ga4DebugEnabled,
+      ),
+    ga4_item_id_format:
+      ga4ItemIdFormat,
     meta_enabled: String(metaEnabled),
     meta_pixel_id: metaPixelId,
     client_event_settings: JSON.stringify({ metaEvents, googleAdsConversions }),
-    test_mode_settings: JSON.stringify(testModeSettings),
   };
 }
 

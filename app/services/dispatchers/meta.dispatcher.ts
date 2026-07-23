@@ -314,9 +314,12 @@ export async function dispatchToMeta(
     };
 
     const effectiveTestEventCode =
-      options.testMode && (options.testEventCodeOverride || testEventCode)
-        ? (options.testEventCodeOverride || testEventCode)
-        : "";
+      clean(
+        options
+          .testEventCodeOverride,
+      ) ||
+      testEventCode ||
+      "";
 
     const requestBody: Record<string, unknown> = {
       data: [metaEvent],
@@ -341,13 +344,34 @@ export async function dispatchToMeta(
         pixelId,
         eventName,
         eventId: event.event_id,
-        testEventCode: effectiveTestEventCode || null,
-        testMode: Boolean(options.testMode),
-        metaResponse: response.data,
+        testEventCode:
+          effectiveTestEventCode ||
+          null,
+        testMode:
+          Boolean(
+            effectiveTestEventCode,
+          ),
+        metaResponse:
+          response.data,
       },
     };
   } catch (error: any) {
-    const responseStatus = Number(error?.response?.status || 0) || null;
+    const responseStatus =
+      Number(
+        error?.response?.status ||
+        0,
+      ) ||
+      null;
+
+    const metaError =
+      error?.response?.data
+        ?.error &&
+      typeof error.response.data
+        .error === "object"
+        ? error.response.data
+            .error
+        : {};
+
     const message = responseStatus
       ? `Meta CAPI request failed with HTTP ${responseStatus}.`
       : error?.code === "ECONNABORTED"
@@ -360,13 +384,44 @@ export async function dispatchToMeta(
       message: `Meta CAPI failed: ${message}`,
       responsePayload: {
         statusCode: responseStatus,
-        errorCategory: responseStatus === 429
-          ? "rate_limited"
-          : responseStatus && responseStatus >= 500
-            ? "service_unavailable"
-            : responseStatus
-              ? "api_rejected"
-              : "network_or_timeout",
+        errorCategory:
+          responseStatus === 429
+            ? "rate_limited"
+            : responseStatus &&
+                responseStatus >=
+                  500
+              ? "service_unavailable"
+              : responseStatus
+                ? "api_rejected"
+                : "network_or_timeout",
+
+        metaError: {
+          type:
+            clean(metaError.type) ||
+            null,
+          code:
+            Number(
+              metaError.code ||
+              0,
+            ) ||
+            null,
+          subcode:
+            Number(
+              metaError.error_subcode ||
+              0,
+            ) ||
+            null,
+          message:
+            clean(
+              metaError.message,
+            ).slice(0, 500) ||
+            null,
+          traceId:
+            clean(
+              metaError.fbtrace_id,
+            ) ||
+            null,
+        },
       },
     };
   }
