@@ -176,7 +176,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
     const tokenData = await exchangeGoogleCode(code);
 
-    await createPlatformConnection({
+    const connection = await createPlatformConnection({
       workspaceId: oauthState.workspaceId,
       platform: "GOOGLE_ADS",
       accountId: tokenData.email,
@@ -184,7 +184,23 @@ export async function loader({ request }: LoaderFunctionArgs) {
       accessToken: tokenData.accessToken,
       refreshToken: tokenData.refreshToken,
       tokenExpiresAt: tokenData.expiresAt,
-      scopes: ["adwords", "analytics", "userinfo", "content"],
+      scopes: [
+        "https://www.googleapis.com/auth/adwords",
+        "https://www.googleapis.com/auth/analytics.readonly",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/content",
+        "https://www.googleapis.com/auth/datamanager",
+      ],
+    });
+
+    await db.platformConnection.updateMany({
+      where: {
+        workspaceId: oauthState.workspaceId,
+        platform: "GOOGLE_ADS",
+        id: { not: connection.id },
+      },
+      data: { isActive: false },
     });
 
     await db.oAuthState.delete({ where: { state } });
@@ -196,16 +212,14 @@ export async function loader({ request }: LoaderFunctionArgs) {
       returnUrl
     );
   } catch (error) {
-    console.error("Error in Google OAuth callback:", error);
-
-    const message =
-      error instanceof Error
-        ? `${error.name}: ${error.message}`
-        : JSON.stringify(error);
+    console.error("Google OAuth callback failed", {
+      category: "oauth_callback_failed",
+      errorName: error instanceof Error ? error.name : "UnknownError",
+    });
 
     return htmlPage(
       "Google connection failed",
-      `Debug error: ${message}`,
+      "Google could not be connected. Please try again and grant all requested permissions.",
       "error",
       returnUrl
     );

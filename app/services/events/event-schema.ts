@@ -61,13 +61,18 @@ export interface EcommerceData {
 }
 
 export interface ProductItem {
+  id?: string;
   item_id: string;
   item_name: string;
   item_brand?: string;
-  item_category?: string;
+  product_id?: string;
+  variant_id?: string;
   item_variant?: string;
+  item_category?: string;
   price: number;
+  discount?: number;
   quantity: number;
+  sku?: string;
 }
 
 export interface ConsentData {

@@ -1,6 +1,5 @@
 // Pinterest Conversions API Dispatcher
 import type { UnifiedEvent } from "../events/event-schema";
-import axios from "axios";
 
 /**
  * Dispatch event to Pinterest Conversions API
@@ -9,6 +8,8 @@ export async function dispatchToPinterest(
   event: UnifiedEvent,
   workspaceId: string
 ): Promise<{ success: boolean; message?: string }> {
+  void workspaceId;
+
   try {
     const pinterestEvent = mapToPinterestFormat(event);
     
@@ -24,7 +25,7 @@ export async function dispatchToPinterest(
 function mapToPinterestFormat(event: UnifiedEvent) {
   return {
     event_name: event.event_name,
-    action_source: "app_android",
+    action_source: "web",
     event_time: Math.floor(event.event_time.getTime() / 1000),
     event_id: event.deduplication_id,
     user_data: {
@@ -36,7 +37,17 @@ function mapToPinterestFormat(event: UnifiedEvent) {
     custom_data: {
       value: event.ecommerce?.value,
       currency: event.ecommerce?.currency,
-      content_ids: event.ecommerce?.items.map(i => i.item_id),
+      content_ids: event.ecommerce?.items.map(
+        (item) => item.id || item.item_id
+      ),
+      line_items: event.ecommerce?.items.map((item) => ({
+        product_id: item.id || item.item_id,
+        product_name: item.item_name,
+        product_price: item.price,
+        product_quantity: item.quantity,
+        product_brand: item.item_brand,
+        product_category: item.item_category,
+      })),
     },
   };
 }

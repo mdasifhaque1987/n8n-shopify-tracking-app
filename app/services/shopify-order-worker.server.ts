@@ -5,6 +5,7 @@ import { decryptToken } from "../lib/encryption.server";
 import { dispatchPurchaseToGoogleAds } from "./dispatchers/google-ads.dispatcher";
 import { dispatchToGA4 } from "./dispatchers/ga4.dispatcher";
 import { dispatchToMeta } from "./dispatchers/meta.dispatcher";
+import { getAssetSelections } from "./asset-selection.server";
 import { createEventDeliveryLog } from "./event-delivery-log.server";
 import type { NormalizedTrackingEvent } from "./normalize-event.server";
 import { verifyShopifyAppPricingSubscription } from "./shopify-app-pricing.server";
@@ -85,19 +86,243 @@ function snapshotFromJob(job: ClaimedJob): MinimizedOrderSnapshot {
   return job.orderSnapshot as unknown as MinimizedOrderSnapshot;
 }
 
+function workerRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+function decryptWorkerRecord(
+  value: string | null | undefined,
+): Record<string, unknown> {
+  if (!value) {
+    return {};
+  }
+
+  try {
+    return workerRecord(
+      JSON.parse(
+        decryptToken(value),
+      ),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function workerText(value: unknown): string {
+  return value === undefined || value === null
+    ? ""
+    : String(value).trim();
+}
+
+function cleanShopifyIdentifier(value: unknown): string {
+  const normalized = workerText(value);
+
+  if (normalized.startsWith("gid://")) {
+    return normalized.split("/").pop() || "";
+  }
+
+  return normalized;
+}
+
+function positiveWorkerQuantity(value: unknown): number {
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : 1;
+}
+
+function finiteWorkerNumber(value: unknown): number | undefined {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+
+  return Number.isFinite(parsed)
+    ? parsed
+    : undefined;
+}
+
+export function buildMetaCatalogContentId(
+  itemValue: unknown,
+  itemIdFormat: string,
+): string {
+  const item = workerRecord(itemValue);
+
+  const rawProductId =
+    item.product_id ||
+    item.item_group_id ||
+    item.productId ||
+    item.id ||
+    item.item_id ||
+    "";
+
+  const rawVariantId =
+    item.variant_id ||
+    item.variantId ||
+    item.sku ||
+    item.item_id ||
+    item.id ||
+    "";
+
+  const productId =
+    cleanShopifyIdentifier(rawProductId);
+
+  const variantId =
+    cleanShopifyIdentifier(rawVariantId);
+
+  const itemId =
+    cleanShopifyIdentifier(
+      item.item_id ||
+      item.id ||
+      productId ||
+      variantId,
+    );
+
+  const sku = workerText(item.sku);
+
+  if (itemIdFormat === "product_id") {
+    return productId || itemId;
+  }
+
+  if (itemIdFormat === "variant_id") {
+    return variantId || itemId;
+  }
+
+  if (itemIdFormat === "sku") {
+    return sku || variantId || itemId;
+  }
+
+  if (itemIdFormat === "product_variant") {
+    if (productId && variantId) {
+      return `${productId}_${variantId}`;
+    }
+
+    return itemId || productId || variantId;
+  }
+
+  if (itemIdFormat === "shopify_country_product_variant") {
+    const country = workerText(
+      item.country ||
+      item.item_country ||
+      item.currency_country ||
+      "US",
+    ).toUpperCase();
+
+    if (productId && variantId) {
+      return `shopify_${country}_${productId}_${variantId}`;
+    }
+
+    return itemId || productId || variantId;
+  }
+
+  return itemId || productId || variantId;
+}
+
+function applyMetaContentIdFormat(
+  event: NormalizedTrackingEvent,
+  itemIdFormat: string,
+): void {
+  const ecommerce = workerRecord(event.ecommerce);
+
+  const items = Array.isArray(ecommerce.items)
+    ? ecommerce.items
+    : [];
+
+  const contentIds: string[] = [];
+  const contents: Array<Record<string, unknown>> = [];
+
+  for (const itemValue of items) {
+    const item = workerRecord(itemValue);
+
+    const id = buildMetaCatalogContentId(
+      item,
+      itemIdFormat,
+    );
+
+    if (!id) {
+      continue;
+    }
+
+    contentIds.push(id);
+
+    contents.push({
+      id,
+      quantity: positiveWorkerQuantity(
+        item.quantity,
+      ),
+      item_price:
+        finiteWorkerNumber(
+          item.item_price,
+        ) ??
+        finiteWorkerNumber(
+          item.price,
+        ),
+    });
+  }
+
+  const existingMeta =
+    workerRecord(event.meta);
+
+  event.meta = {
+    ...existingMeta,
+    event_name:
+      event.meta_event ||
+      workerText(
+        existingMeta.event_name,
+      ) ||
+      "Purchase",
+    content_type:
+      workerText(
+        existingMeta.content_type,
+      ) ||
+      "product",
+    content_ids: contentIds,
+    contents,
+  };
+}
+
 function eventFromJob(job: ClaimedJob): NormalizedTrackingEvent {
   const snapshot = snapshotFromJob(job);
-  const customer = job.encryptedCustomerData
-    ? JSON.parse(decryptToken(job.encryptedCustomerData)) as Record<string, unknown>
-    : {};
+  const customer =
+    decryptWorkerRecord(
+      job.encryptedCustomerData,
+    );
+
+  const trackingIdentity =
+    decryptWorkerRecord(
+      job.encryptedTrackingIdentity,
+    );
+
+  const gaClientId =
+    workerText(
+      trackingIdentity.clientId,
+    );
+
+  const gaSessionId =
+    workerText(
+      trackingIdentity.sessionId,
+    );
+
   const address = customer.address && typeof customer.address === "object"
     ? customer.address as Record<string, unknown>
     : {};
   const items = snapshot.items.map((item) => ({
+    id: item.itemId,
     item_id: item.itemId,
     item_name: item.itemName,
+    item_brand: item.itemBrand,
+    product_id: item.productId,
+    variant_id: item.variantId,
+    item_variant: item.itemVariant,
+    item_category: item.itemCategory,
     price: item.price,
+    discount: item.discount,
     quantity: item.quantity,
+    sku: item.sku,
   }));
 
   return {
@@ -108,7 +333,20 @@ function eventFromJob(job: ClaimedJob): NormalizedTrackingEvent {
     event_time: snapshot.createdAt && Number.isFinite(Date.parse(snapshot.createdAt))
       ? Math.floor(Date.parse(snapshot.createdAt) / 1000)
       : Math.floor(job.createdAt.getTime() / 1000),
+    client_id:
+      gaClientId || undefined,
     transaction_id: job.orderId,
+    raw:
+      gaClientId || gaSessionId
+        ? {
+            client_id:
+              gaClientId ||
+              undefined,
+            session_id:
+              gaSessionId ||
+              undefined,
+          }
+        : undefined,
     customer: {
       email: customer.email,
       phone: customer.phone,
@@ -145,7 +383,7 @@ export type WorkerDependencies = {
   getConfiguredPlatforms(workspaceId: string): Promise<Record<OrderDeliveryPlatform, boolean>>;
   markBlocked(jobId: string, category: string): Promise<void>;
   markDeliveryProcessing(deliveryId: string, workerId: string): Promise<number>;
-  dispatch(platform: OrderDeliveryPlatform, event: NormalizedTrackingEvent, workspaceId: string): Promise<DispatchResult>;
+  dispatch(platform: OrderDeliveryPlatform, event: NormalizedTrackingEvent, workspaceId: string, delivery: ShopifyOrderPlatformDelivery): Promise<DispatchResult>;
   finishDelivery(delivery: ShopifyOrderPlatformDelivery, decision: DeliveryDecision, attempt: number, now: Date): Promise<void>;
   writeDeliveryLog(platform: OrderDeliveryPlatform, event: NormalizedTrackingEvent, workspaceId: string, decision: DeliveryDecision): Promise<void>;
   finishJob(jobId: string, now: Date): Promise<void>;
@@ -263,10 +501,60 @@ const defaultDependencies: WorkerDependencies = {
     });
     return delivery.attemptCount;
   },
-  async dispatch(platform, event, workspaceId) {
-    if (platform === "google_ads") return dispatchPurchaseToGoogleAds(event, workspaceId);
-    if (platform === "ga4") return dispatchToGA4(event, workspaceId);
-    return dispatchToMeta(event, workspaceId);
+  async dispatch(platform, event, workspaceId, delivery) {
+    const options = {
+      testMode: delivery.testMode,
+      validationOnly: delivery.validationOnly,
+    };
+
+    if (platform === "google_ads") {
+      return dispatchPurchaseToGoogleAds(
+        event,
+        workspaceId,
+        options,
+      );
+    }
+
+    if (platform === "ga4") {
+      return dispatchToGA4(
+        event,
+        workspaceId,
+        options,
+      );
+    }
+
+    const selectedAssets =
+      await getAssetSelections(
+        workspaceId,
+      );
+
+    const metaContentIdFormat =
+      String(
+        selectedAssets[
+          "meta:Meta Content ID Format"
+        ] ||
+        "shopify_country_product_variant",
+      ).trim();
+
+    applyMetaContentIdFormat(
+      event,
+      metaContentIdFormat,
+    );
+
+    return dispatchToMeta(
+      event,
+      workspaceId,
+      {
+        testMode:
+          delivery.testMode,
+        testEventCodeOverride:
+          delivery.encryptedTestCode
+            ? decryptToken(
+                delivery.encryptedTestCode,
+              )
+            : null,
+      },
+    );
   },
   async finishDelivery(delivery, decision, attempt, now) {
     const completed = decision.status === "sent" || decision.status === "skipped" || decision.status === "failed";
@@ -383,7 +671,7 @@ export async function processNextOrderJob(
     const attempt = await dependencies.markDeliveryProcessing(delivery.id, workerId);
     let decision: DeliveryDecision;
     try {
-      const result = await dependencies.dispatch(platform, event, workspaceId);
+      const result = await dependencies.dispatch(platform, event, workspaceId, delivery);
       decision = classifyDeliveryResult(result, attempt);
     } catch (error) {
       const message = error instanceof Error ? error.name : "dispatch_error";

@@ -23,7 +23,14 @@ export const loader = async ({ request }) => {
     }
   }
 
-  const pixelStatus = await getEventIngestPixelStatus(session.shop, admin);
+  const pixelStatus = await getEventIngestPixelStatus(
+    session.shop,
+    admin,
+  );
+
+  const pixelReady =
+    pixelStatus.pixelExists &&
+    pixelStatus.ingestKeyConfigured;
 
   return {
     ok: true,
@@ -31,14 +38,20 @@ export const loader = async ({ request }) => {
     shopHandle,
     navQuery: params.toString(),
     title: "Web Pixel Status",
-    status: pixelStatus.ingestKeyConfigured
-      ? "Event ingestion key active"
-      : "Pixel refresh required",
-    ingestKeyConfigured: pixelStatus.ingestKeyConfigured,
-    message:
-      pixelStatus.ingestKeyConfigured
-        ? "This pixel has a public write-only installation key for tenant routing and rate-limit partitioning. It does not prove that telemetry came from Shopify. Rotating it revokes the previous key."
-        : "Refresh the Shopify web pixel to add its public write-only installation key. Client telemetry is rejected until this is completed.",
+    pixelExists: pixelStatus.pixelExists,
+    pixelReady,
+    status: pixelReady
+      ? "Active / Connected"
+      : pixelStatus.pixelExists
+        ? "Connected / Refresh required"
+        : "Not active",
+    ingestKeyConfigured:
+      pixelStatus.ingestKeyConfigured,
+    message: pixelReady
+      ? "Shopify confirms that the DH Conversions web pixel is active and its installation key is configured."
+      : pixelStatus.pixelExists
+        ? "The Shopify web pixel exists, but its installation settings need to be refreshed."
+        : "No DH Conversions web pixel is active for this store. Activate the pixel before testing storefront events.",
     nextSteps: [
       "Use Shopify Admin → Settings → Customer events to review the app pixel connection.",
       "Use the app Configuration page to manage Meta, GA4, Google Ads, and server-side settings.",
@@ -58,12 +71,20 @@ export const action = async ({ request }) => {
       admin,
     });
 
-    return { ok: true, message: result.created ? "Web pixel and installation key created." : "Public installation key rotated." };
+    return {
+      ok: true,
+      message: result.created
+        ? "Web pixel activated successfully."
+        : "Web pixel refreshed successfully.",
+    };
   } catch (error) {
-    return Response.json(
-      { ok: false, message: error instanceof Error ? error.message : "Pixel update failed." },
-      { status: 500 },
-    );
+    return {
+      ok: false,
+      message:
+        error instanceof Error
+          ? error.message
+          : "Pixel update failed.",
+    };
   }
 };
 
@@ -87,7 +108,7 @@ export default function ActivatePixel() {
         <div
           style={{
             ...styles.status,
-            ...(data.ingestKeyConfigured ? styles.success : styles.warning),
+            ...(data.pixelReady ? styles.success : styles.warning),
           }}
         >
           {data.status}
@@ -101,7 +122,7 @@ export default function ActivatePixel() {
 
         <Form method="post">
           <button type="submit" style={styles.primaryLink}>
-            {data.ingestKeyConfigured ? "Rotate installation key" : "Refresh web pixel"}
+            {data.pixelExists ? "Refresh Pixel" : "Activate Pixel"}
           </button>
         </Form>
 

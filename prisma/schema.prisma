@@ -45,7 +45,11 @@ model ShopSettings {
   bingUetTagId                 String?
   workspaceId                  String? // Link to workspace
   workspace                    Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
-  eventIngestKeyHash           String?     @unique
+  eventIngestKeyHash           String?    @unique
+  encryptedEventIngestKey      String?
+  webPixelId                   String?
+  webPixelSyncedAt             DateTime?
+  webPixelSyncError            String?
   shopifyShopGid               String?
   shopifyPlanHandle            String?
   subscriptionPlan             String?
@@ -264,23 +268,37 @@ model EventDeliveryLog {
   @@index([platform])
 }
 
+model ShopifyCheckoutCorrelation {
+  id                String   @id @default(cuid())
+  shop              String
+  checkoutTokenHash String
+  encryptedPayload  String
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([shop, checkoutTokenHash])
+  @@index([expiresAt])
+}
+
 model ShopifyOrderJob {
-  id                    String                         @id @default(cuid())
-  shop                  String
-  orderId               String
-  webhookId             String?
-  orderSnapshot         Json
-  encryptedCustomerData String?
-  status                String                         @default("pending")
-  attemptCount          Int                            @default(0)
-  nextAttemptAt         DateTime                       @default(now())
-  lockedAt              DateTime?
-  leaseOwner            String?
-  lastErrorCategory     String?
-  completedAt           DateTime?
-  deliveries            ShopifyOrderPlatformDelivery[]
-  createdAt             DateTime                       @default(now())
-  updatedAt             DateTime                       @updatedAt
+  id                        String                         @id @default(cuid())
+  shop                      String
+  orderId                   String
+  webhookId                 String?
+  orderSnapshot             Json
+  encryptedCustomerData     String?
+  encryptedTrackingIdentity String?
+  status                    String                         @default("pending")
+  attemptCount              Int                            @default(0)
+  nextAttemptAt             DateTime                       @default(now())
+  lockedAt                  DateTime?
+  leaseOwner                String?
+  lastErrorCategory         String?
+  completedAt               DateTime?
+  deliveries                ShopifyOrderPlatformDelivery[]
+  createdAt                 DateTime                       @default(now())
+  updatedAt                 DateTime                       @updatedAt
 
   @@unique([shop, orderId])
   @@index([status, nextAttemptAt])
@@ -294,15 +312,20 @@ model ShopifyOrderPlatformDelivery {
   shop              String
   orderId           String
   platform          String
+  testMode          Boolean         @default(false)
+  testModeSource    String          @default("DEFAULT")
+  testMechanism     String          @default("PRODUCTION")
+  validationOnly    Boolean         @default(false)
+  encryptedTestCode String?
   status            String          @default("pending")
   attemptCount      Int             @default(0)
-  nextAttemptAt     DateTime         @default(now())
+  nextAttemptAt     DateTime        @default(now())
   lockedAt          DateTime?
   leaseOwner        String?
   lastErrorCategory String?
   completedAt       DateTime?
-  createdAt         DateTime         @default(now())
-  updatedAt         DateTime         @updatedAt
+  createdAt         DateTime        @default(now())
+  updatedAt         DateTime        @updatedAt
 
   @@unique([shop, orderId, platform])
   @@index([jobId, status, nextAttemptAt])

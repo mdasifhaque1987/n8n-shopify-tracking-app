@@ -11,6 +11,7 @@ export type Ga4DispatchResult = {
 export type Ga4DispatchOptions = {
   testMode?: boolean;
   debugMode?: boolean;
+  validationOnly?: boolean;
 };
 
 function stringValue(value: unknown) {
@@ -147,23 +148,43 @@ function mapItems(items: unknown) {
   return items.slice(0, 100).map((item) => {
     const row = objectValue(item);
 
+    const itemId =
+      stringValue(row.item_id) ||
+      stringValue(row.id) ||
+      stringValue(row.product_id) ||
+      stringValue(row.variant_id) ||
+      stringValue(row.sku);
+
     return cleanObject({
-      item_id:
-        stringValue(row.item_id) ||
+      id:
         stringValue(row.id) ||
-        stringValue(row.product_id) ||
-        stringValue(row.variant_id) ||
-        stringValue(row.sku),
+        itemId,
+      item_id: itemId,
       item_name:
         stringValue(row.item_name) ||
         stringValue(row.name) ||
         stringValue(row.product_title) ||
         stringValue(row.title),
-      item_brand: stringValue(row.item_brand) || stringValue(row.brand),
-      item_category: stringValue(row.item_category) || stringValue(row.category),
-      item_variant: stringValue(row.item_variant) || stringValue(row.variant),
+      item_brand:
+        stringValue(row.item_brand) ||
+        stringValue(row.brand),
+      product_id:
+        stringValue(row.product_id) ||
+        stringValue(row.productId),
+      variant_id:
+        stringValue(row.variant_id) ||
+        stringValue(row.variantId),
+      item_variant:
+        stringValue(row.item_variant) ||
+        stringValue(row.variant),
+      item_category:
+        stringValue(row.item_category) ||
+        stringValue(row.category),
       price: numberValue(row.price),
-      quantity: numberValue(row.quantity) || 1,
+      discount:
+        numberValue(row.discount) ?? 0,
+      quantity:
+        numberValue(row.quantity) || 1,
     });
   });
 }
@@ -374,19 +395,22 @@ export async function dispatchToGA4(
 
     const body = buildGa4Body(event, options);
 
-    const validationResult = options.testMode
+    const validationResult = options.validationOnly
       ? await postGa4WithTimeout(debugEndpoint.toString(), body)
       : null;
 
-    const collectResult = await postGa4WithTimeout(collectEndpoint.toString(), body);
+    const collectResult = options.validationOnly
+      ? null
+      : await postGa4WithTimeout(collectEndpoint.toString(), body);
 
     const safePayload = {
-      ...(collectResult.payload || {}),
+      ...(collectResult?.payload || {}),
       mode: options.testMode ? "test" : "live",
       testMode: Boolean(options.testMode),
       debugMode: Boolean(options.debugMode || options.testMode),
       measurementId,
-      statusCode: collectResult.status,
+      statusCode: collectResult?.status || validationResult?.status,
+      validationOnly: Boolean(options.validationOnly),
       eventName: event.event_name,
       eventId: event.event_id,
       validationStatusCode: validationResult?.status,
@@ -412,13 +436,26 @@ export async function dispatchToGA4(
       },
     };
 
-    if (!collectResult.ok) {
+    if (options.validationOnly) {
+      const messages = validationResult?.payload?.validationMessages;
+      const invalid = Array.isArray(messages) && messages.length > 0;
+      return {
+        success: Boolean(validationResult?.ok) && !invalid,
+        status: validationResult?.ok && !invalid ? "success" : "failed",
+        message: validationResult?.ok && !invalid
+          ? "GA4 payload validated only; it was not delivered to reports."
+          : "GA4 validation-only request returned validation errors.",
+        responsePayload: safePayload,
+      };
+    }
+
+    if (!collectResult?.ok) {
       return {
         success: false,
         status: "failed",
-        message: collectResult.timedOut
+        message: collectResult?.timedOut
           ? "GA4 Measurement Protocol request timed out after 8 seconds."
-          : `GA4 Measurement Protocol failed with status ${collectResult.status}.`,
+          : `GA4 Measurement Protocol failed with status ${collectResult?.status || 0}.`,
         responsePayload: safePayload,
       };
     }

@@ -43,6 +43,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
   let ga4ClientSideEnabled = Boolean(ga4MeasurementId);
   let ga4ServerSideEnabled = false;
   let testModeEnabled = false;
+  let ga4ClientTestMode = false;
+  let metaPixelTestMode = false;
 
   const googleAdsConversions: Record<string, unknown> = {};
   const googleAdsMissingLabels: string[] = [];
@@ -69,6 +71,8 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const ga4DeliverySettings = await getGa4DeliverySettings(settings.workspaceId);
     const testModeSettings = await getTestModeSettings(settings.workspaceId);
     testModeEnabled = Boolean(testModeSettings?.enabled);
+    ga4ClientTestMode = Boolean(testModeSettings.channels.ga4_client.effective.enabled);
+    metaPixelTestMode = Boolean(testModeSettings.channels.meta_pixel.effective.enabled);
 
     if (ga4DeliverySettings.setting?.isActive) {
       ga4DeliveryMode = ga4DeliverySettings.setting.deliveryMode || "client";
@@ -106,10 +110,6 @@ export async function loader({ request }: LoaderFunctionArgs) {
     const metaServerSideEnabled =
       String(selectedAssets["meta:Meta Server Side Enabled"] || "false") === "true";
 
-    const metaTestEventCode = String(
-      selectedAssets["meta:Meta Test Event Code"] || ""
-    ).trim();
-
     const metaContentIdFormat = String(
       selectedAssets["meta:Meta Content ID Format"] ||
         "shopify_country_product_variant"
@@ -128,9 +128,10 @@ export async function loader({ request }: LoaderFunctionArgs) {
         entitlements.metaCapi && metaServerSideEnabled && metaCapiAccessTokenConfigured
       ),
       selectedEvents: metaSelectedEvents,
-      testEventCode: metaTestEventCode === "none" ? "" : metaTestEventCode,
+      testEventCodeConfigured: Boolean(selectedAssets["meta:Meta Test Event Code"] && selectedAssets["meta:Meta Test Event Code"] !== "none"),
       contentIdFormat: metaContentIdFormat,
       capiAccessTokenConfigured: metaCapiAccessTokenConfigured,
+      testMode: metaPixelTestMode,
     };
 
     const selectedGoogleAdsCustomerId =
@@ -253,7 +254,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         deliveryMode: ga4DeliveryMode,
         clientSideEnabled: ga4ClientSideEnabled,
         serverSideEnabled: ga4ServerSideEnabled,
-        testMode: testModeEnabled,
+        testMode: ga4ClientTestMode,
       },
       googleAds: {
         enabled: Object.keys(googleAdsConversions).length > 0,

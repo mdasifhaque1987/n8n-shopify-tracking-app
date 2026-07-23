@@ -380,7 +380,7 @@ async function dispatchPurchaseToGoogleAdsDataManager(
       options.validateOnly || options.testMode || getDataManagerValidateOnly()
     );
 
-    const body = {
+    const body: Record<string, unknown> = {
       destinations: [
         {
           operatingAccount: {
@@ -395,8 +395,8 @@ async function dispatchPurchaseToGoogleAdsDataManager(
         },
       ],
       events: [dataManagerEvent],
-      validateOnly,
     };
+    if (validateOnly) body.validateOnly = true;
 
     const response = await fetch(
       "https://datamanager.googleapis.com/v1/events:ingest",

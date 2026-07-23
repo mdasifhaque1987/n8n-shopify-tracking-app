@@ -3,6 +3,7 @@
 import axios from "axios";
 import crypto from "crypto";
 import db from "../../db.server";
+import { decryptToken } from "../../lib/encryption.server";
 
 const META_GRAPH_API_VERSION = process.env.META_GRAPH_API_VERSION || "v18.0";
 
@@ -15,6 +16,7 @@ type MetaDispatchResult = {
 
 type MetaDispatchOptions = {
   testMode?: boolean;
+  testEventCodeOverride?: string | null;
   clientIpAddress?: string | null;
   clientUserAgent?: string | null;
 };
@@ -22,6 +24,12 @@ type MetaDispatchOptions = {
 function clean(value: unknown) {
   if (value === undefined || value === null) return "";
   return String(value).trim();
+}
+
+function decryptStoredSecret(value: unknown) {
+  const stored = clean(value);
+  if (!stored || stored === "none") return "";
+  return stored.startsWith("enc:v1:") ? decryptToken(stored.slice(7)) : stored;
 }
 
 function normalizeForHash(value: unknown, type = "text") {
@@ -228,12 +236,12 @@ async function getMetaAccess(workspaceId: string) {
     ]);
 
   return {
-    accessToken: clean(capiAccessTokenSelection?.assetValue),
+    accessToken: decryptStoredSecret(capiAccessTokenSelection?.assetValue),
     pixelId: clean(datasetSelection?.assetValue),
     testEventCode:
       clean(testEventCodeSelection?.assetValue) === "none"
         ? ""
-        : clean(testEventCodeSelection?.assetValue),
+        : decryptStoredSecret(testEventCodeSelection?.assetValue),
   };
 }
 
@@ -306,8 +314,8 @@ export async function dispatchToMeta(
     };
 
     const effectiveTestEventCode =
-      options.testMode && testEventCode
-        ? testEventCode
+      options.testMode && (options.testEventCodeOverride || testEventCode)
+        ? (options.testEventCodeOverride || testEventCode)
         : "";
 
     const requestBody: Record<string, unknown> = {

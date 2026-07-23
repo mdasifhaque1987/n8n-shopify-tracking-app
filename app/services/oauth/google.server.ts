@@ -4,6 +4,7 @@ import {
   updateConnectionTokens,
   getPlatformConnection,
 } from "../platform-connection.server";
+import { discoverGa4Properties } from "../ga4-property-discovery.server";
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
@@ -168,7 +169,10 @@ export async function exchangeGoogleCode(code: string): Promise<{
       email: userInfo.data.email || "",
     };
   } catch (error: unknown) {
-    console.error("Error exchanging Google code:", error);
+    console.error("Google token exchange failed", {
+      status: getGoogleApiErrorStatus(error),
+      category: "token_exchange_failed",
+    });
 
     const candidate = error as GoogleOAuthErrorShape;
 
@@ -225,7 +229,10 @@ export async function refreshGoogleToken(
       expiresAt,
     };
   } catch (error) {
-    console.error("Error refreshing Google token:", error);
+    console.error("Google token refresh failed", {
+      status: getGoogleApiErrorStatus(error),
+      category: "token_refresh_failed",
+    });
     throw new Error("Failed to refresh access token");
   }
 }
@@ -265,7 +272,10 @@ export async function getGoogleAdsAccounts(
       (await response.json()) as GoogleAdsAccountsResponse;
 
     if (!response.ok) {
-      console.error("Google Ads accounts error:", data);
+      console.error("Google Ads account discovery failed", {
+        status: response.status,
+        category: "google_ads_api_error",
+      });
 
       if (response.status === 401) {
         throw createGoogleApiError(
@@ -321,7 +331,10 @@ export async function getMerchantCenters(
       (await response.json()) as MerchantCentersResponse;
 
     if (!response.ok) {
-      console.error("Merchant Center authinfo error:", data);
+      console.error("Merchant Center discovery failed", {
+        status: response.status,
+        category: "merchant_center_api_error",
+      });
 
       if (response.status === 401) {
         throw createGoogleApiError(
@@ -365,52 +378,8 @@ export async function getMerchantCenters(
  */
 export async function getGoogleAnalyticsProperties(
   accessToken: string
-): Promise<
-  Array<{
-    propertyId: string;
-    displayName: string;
-  }>
-> {
-  const oauth2Client = createOAuth2Client();
-  oauth2Client.setCredentials({ access_token: accessToken });
-
-  try {
-    const analytics = google.analyticsadmin({ version: "v1beta", auth: oauth2Client });
-    
-    // List accounts
-    const accountsResponse = await analytics.accounts.list();
-    const accounts = accountsResponse.data.accounts || [];
-
-    const properties: Array<{ propertyId: string; displayName: string }> = [];
-
-    // Get properties for each account
-    for (const account of accounts) {
-      if (account.name) {
-        const propertiesResponse = await analytics.properties.list({
-          filter: `parent:${account.name}`,
-        });
-
-        const accountProperties = propertiesResponse.data.properties || [];
-        accountProperties.forEach((prop) => {
-          if (prop.name && prop.displayName) {
-            properties.push({
-              propertyId: prop.name.split("/").pop() || "",
-              displayName: prop.displayName,
-            });
-          }
-        });
-      }
-    }
-
-    return properties;
-  } catch (error) {
-    if (getGoogleApiErrorStatus(error) === 401) {
-      throw error;
-    }
-
-    console.error("Error getting Analytics properties:", error);
-    return [];
-  }
+) {
+  return discoverGa4Properties(accessToken);
 }
 
 
@@ -442,19 +411,16 @@ export async function getGoogleAnalyticsDataStreams(
     );
 
     if (!response.ok) {
-      const errorBody = await response.text();
-
-      console.warn(
-        "GA4 data streams API failed",
-        response.status,
-        errorBody
-      );
+      console.warn("GA4 data stream discovery failed", {
+        status: response.status,
+        category: "ga4_data_stream_api_error",
+      });
 
       if (response.status === 401) {
         throw createGoogleApiError(
           "GA4 data streams access token was rejected.",
           response.status,
-          errorBody
+          undefined
         );
       }
 

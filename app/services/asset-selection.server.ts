@@ -42,3 +42,32 @@ export async function getAssetSelections(workspaceId: string) {
 
   return selections;
 }
+
+export async function getAssetSelectionLabels(workspaceId: string) {
+  const rows = await db.shopAssetSelection.findMany({
+    where: { workspaceId },
+    select: {
+      platform: true,
+      assetType: true,
+      assetLabel: true,
+    },
+  });
+
+  const labels: Record<string, string> = {};
+
+  for (const row of rows) {
+    if (row.assetLabel) {
+      labels[`${row.platform}:${row.assetType}`] = row.assetLabel;
+    }
+  }
+
+  return labels;
+}
+
+export async function deleteAssetSelection(data: {
+  workspaceId: string;
+  platform: string;
+  assetType: string;
+}) {
+  return db.shopAssetSelection.deleteMany({ where: data });
+}

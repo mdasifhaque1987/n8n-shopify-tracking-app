@@ -11,7 +11,10 @@ const DH_GA_CLIENT_ID_KEY = "dh_ga4_client_id";
 const DH_GA_SESSION_ID_KEY = "dh_ga4_session_id";
 const DH_GA_SESSION_TS_KEY = "dh_ga4_session_ts";
 const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
-const DH_PIXEL_VERSION = "2026-07-18-client-delivery-logs-v6";
+const DH_ITEM_METADATA_STORAGE_KEY = "dh_item_metadata_v1";
+const DH_ITEM_METADATA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DH_ITEM_METADATA_MAX_ENTRIES = 200;
+const DH_PIXEL_VERSION = "2026-07-23-checkout-item-metadata-v7";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
@@ -27,6 +30,48 @@ async function getConfig(shop) {
 
   cachedConfig = await res.json();
   return cachedConfig;
+}
+
+function parseSettingJson(value, fallback) {
+  try {
+    return value ? JSON.parse(value) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function configFromPixelSettings(settings) {
+  if (!settings) return null;
+  const clientEvents = parseSettingJson(settings.client_event_settings, {});
+  const testMode = parseSettingJson(settings.test_mode_settings, { enabled: false, channels: {} });
+  const ga4Test = testMode.channels && testMode.channels.ga4_client;
+  return {
+    testMode: Boolean(testMode.enabled),
+    ga4: {
+      enabled: settings.ga4_enabled === "true",
+      clientSideEnabled: settings.ga4_enabled === "true",
+      deliveryMode: "client",
+      measurementId: settings.ga4_measurement_id || null,
+      testMode: Boolean(ga4Test && ga4Test.enabled),
+    },
+    meta: {
+      enabled: settings.meta_enabled === "true",
+      clientSideEnabled: settings.meta_enabled === "true",
+      pixelId: settings.meta_pixel_id || null,
+      datasetId: settings.meta_pixel_id || null,
+      selectedEvents: Array.isArray(clientEvents.metaEvents) ? clientEvents.metaEvents : [],
+      testMode: Boolean(testMode.channels && testMode.channels.meta_pixel && testMode.channels.meta_pixel.enabled),
+    },
+    googleAds: {
+      enabled: Array.isArray(clientEvents.googleAdsConversions) && clientEvents.googleAdsConversions.length > 0,
+      conversions: (clientEvents.googleAdsConversions || []).reduce(function (result, conversion) {
+        var key = conversion.eventName;
+        if (!result[key]) result[key] = [];
+        result[key].push(conversion);
+        return result;
+      }, {}),
+    },
+  };
 }
 
 function getShop(event) {
@@ -146,7 +191,7 @@ function getAppProxyTrackUrls(payload) {
   return [APP_PROXY_TRACK_URL];
 }
 
-async function sendToServer(payload, ingestKey) {
+async function sendToServer(payload, ingestKey, ingestionEndpoint) {
   try {
     if (!ingestKey) return false;
 
@@ -155,7 +200,7 @@ async function sendToServer(payload, ingestKey) {
 
     // Send direct server endpoint first for checkout step reliability.
     // App proxy is kept only as fallback.
-    const endpoints = [TRACK_URL].concat(appProxyUrls).filter(Boolean);
+    const endpoints = [ingestionEndpoint || TRACK_URL].concat(appProxyUrls).filter(Boolean);
     let lastError = null;
 
     for (const endpoint of endpoints) {
@@ -225,6 +270,10 @@ function mapEvent(name) {
     checkout_contact_info_submitted: {
       ga4: "add_contact_info",
       meta: "Lead",
+    },
+    checkout_address_info_submitted: {
+      ga4: "add_shipping_info",
+      meta: "AddShippingInfo",
     },
     checkout_shipping_info_submitted: {
       ga4: "add_shipping_info",
@@ -772,75 +821,755 @@ function getEcommerce(data, value, currency, transactionId, items) {
   };
 }
 
+function firstItemMoney() {
+  for (let index = 0; index < arguments.length; index += 1) {
+    const parsed = cleanMoney(arguments[index]);
+
+    if (
+      typeof parsed === "number" &&
+      Number.isFinite(parsed)
+    ) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function roundItemMoney(value) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed)) {
+    return 0;
+  }
+
+  return Number(Math.max(0, parsed).toFixed(6));
+}
+
+function positiveItemQuantity(value) {
+  const parsed = Number(value);
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 1;
+  }
+
+  return parsed;
+}
+
+function cleanItemIdentifier(value) {
+  const normalized = String(
+    safeString(value) || ""
+  ).trim();
+
+  if (normalized.indexOf("gid://") === 0) {
+    return normalized.split("/").pop() || "";
+  }
+
+  return normalized;
+}
+
+function getItemCategory(product) {
+  product = product || {};
+
+  if (product.productType) {
+    return String(product.productType);
+  }
+
+  if (product.type) {
+    return String(product.type);
+  }
+
+  if (typeof product.category === "string") {
+    return product.category;
+  }
+
+  if (
+    product.category &&
+    typeof product.category === "object"
+  ) {
+    return String(
+      product.category.fullName ||
+      product.category.name ||
+      ""
+    );
+  }
+
+  return "";
+}
+
+function getLineDiscountTotal(line) {
+  line = line || {};
+
+  const directDiscount = firstItemMoney(
+    line.totalDiscount?.amount,
+    line.total_discount,
+    line.totalDiscount
+  );
+
+  if (directDiscount !== null) {
+    return roundItemMoney(directDiscount);
+  }
+
+  const allocations =
+    line.discountAllocations ||
+    line.discount_allocations ||
+    [];
+
+  if (!Array.isArray(allocations)) {
+    return 0;
+  }
+
+  return roundItemMoney(
+    allocations.reduce(function (sum, allocation) {
+      const amount = firstItemMoney(
+        allocation?.discountedAmount?.amount,
+        allocation?.amount?.amount,
+        allocation?.amount
+      );
+
+      return sum + (amount || 0);
+    }, 0)
+  );
+}
+
+function buildNormalizedItem(input) {
+  const itemId = cleanItemIdentifier(
+    input.itemId
+  );
+
+  return {
+    id: itemId,
+    item_id: itemId,
+    item_name: String(
+      input.itemName || ""
+    ),
+    item_brand: String(
+      input.itemBrand || ""
+    ),
+    product_id: cleanItemIdentifier(
+      input.productId
+    ),
+    variant_id: cleanItemIdentifier(
+      input.variantId
+    ),
+    item_variant: String(
+      input.itemVariant || ""
+    ),
+    price: roundItemMoney(
+      input.price
+    ),
+    discount: roundItemMoney(
+      input.discount
+    ),
+    item_category: String(
+      input.itemCategory || ""
+    ),
+    quantity: positiveItemQuantity(
+      input.quantity
+    ),
+    sku: String(
+      safeString(input.sku) || ""
+    ),
+    currency:
+      input.currency
+        ? String(input.currency)
+        : undefined,
+  };
+}
+
+function parseItemMetadataCache(raw) {
+  try {
+    const parsed = raw
+      ? JSON.parse(raw)
+      : {};
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
+    ) {
+      return parsed;
+    }
+  } catch {
+    return {};
+  }
+
+  return {};
+}
+
+function getItemMetadataKeys(item) {
+  item = item || {};
+
+  const values = [
+    item.variant_id,
+    item.item_id,
+    item.id,
+    item.sku,
+  ];
+
+  const keys = [];
+
+  values.forEach(function (value) {
+    const normalized =
+      cleanItemIdentifier(value);
+
+    if (
+      normalized &&
+      keys.indexOf(normalized) === -1
+    ) {
+      keys.push(normalized);
+    }
+  });
+
+  return keys;
+}
+
+function getMeaningfulItemVariant(value, item) {
+  const normalized =
+    String(value || "").trim();
+
+  if (!normalized) {
+    return "";
+  }
+
+  const identifiers = [
+    item?.variant_id,
+    item?.item_id,
+    item?.id,
+  ]
+    .map(function (identifier) {
+      return cleanItemIdentifier(
+        identifier
+      );
+    })
+    .filter(Boolean);
+
+  if (
+    identifiers.indexOf(
+      cleanItemIdentifier(normalized)
+    ) !== -1
+  ) {
+    return "";
+  }
+
+  return normalized;
+}
+
+function mergeItemMetadata(item, cached) {
+  item = item || {};
+  cached = cached || {};
+
+  const currentVariant =
+    getMeaningfulItemVariant(
+      item.item_variant,
+      item
+    );
+
+  const cachedVariant =
+    getMeaningfulItemVariant(
+      cached.item_variant,
+      item
+    );
+
+  const sku =
+    String(
+      item.sku ||
+      cached.sku ||
+      ""
+    ).trim();
+
+  return {
+    ...item,
+    item_name:
+      item.item_name ||
+      cached.item_name ||
+      "",
+    item_brand:
+      item.item_brand ||
+      cached.item_brand ||
+      "",
+    product_id:
+      item.product_id ||
+      cached.product_id ||
+      "",
+    variant_id:
+      item.variant_id ||
+      cached.variant_id ||
+      "",
+    item_variant:
+      currentVariant ||
+      cachedVariant ||
+      sku ||
+      "",
+    item_category:
+      item.item_category ||
+      cached.item_category ||
+      "",
+    sku,
+  };
+}
+
+async function enrichItemsWithStoredMetadata(
+  items,
+  browser
+) {
+  if (
+    !Array.isArray(items) ||
+    !items.length
+  ) {
+    return [];
+  }
+
+  const raw = await storageGet(
+    browser,
+    DH_ITEM_METADATA_STORAGE_KEY
+  );
+
+  const cache =
+    parseItemMetadataCache(raw);
+
+  const now = Date.now();
+
+  return items.map(function (item) {
+    const keys =
+      getItemMetadataKeys(item);
+
+    let cached = null;
+
+    for (
+      let index = 0;
+      index < keys.length;
+      index += 1
+    ) {
+      const candidate =
+        cache[keys[index]];
+
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        now -
+          Number(
+            candidate.updated_at || 0
+          ) <=
+          DH_ITEM_METADATA_TTL_MS
+      ) {
+        cached = candidate;
+        break;
+      }
+    }
+
+    return mergeItemMetadata(
+      item,
+      cached
+    );
+  });
+}
+
+async function persistItemMetadata(
+  items,
+  browser
+) {
+  if (
+    !Array.isArray(items) ||
+    !items.length
+  ) {
+    return;
+  }
+
+  const raw = await storageGet(
+    browser,
+    DH_ITEM_METADATA_STORAGE_KEY
+  );
+
+  const current =
+    parseItemMetadataCache(raw);
+
+  const now = Date.now();
+  const cache = {};
+
+  Object.keys(current).forEach(
+    function (key) {
+      const candidate =
+        current[key];
+
+      if (
+        candidate &&
+        typeof candidate === "object" &&
+        now -
+          Number(
+            candidate.updated_at || 0
+          ) <=
+          DH_ITEM_METADATA_TTL_MS
+      ) {
+        cache[key] = candidate;
+      }
+    }
+  );
+
+  items.forEach(function (item) {
+    const variant =
+      getMeaningfulItemVariant(
+        item.item_variant,
+        item
+      );
+
+    const metadata = {
+      item_name:
+        String(
+          item.item_name || ""
+        ),
+      item_brand:
+        String(
+          item.item_brand || ""
+        ),
+      product_id:
+        cleanItemIdentifier(
+          item.product_id
+        ),
+      variant_id:
+        cleanItemIdentifier(
+          item.variant_id
+        ),
+      item_variant:
+        variant ||
+        String(item.sku || ""),
+      item_category:
+        String(
+          item.item_category || ""
+        ),
+      sku:
+        String(item.sku || ""),
+      updated_at: now,
+    };
+
+    getItemMetadataKeys(item).forEach(
+      function (key) {
+        cache[key] = metadata;
+      }
+    );
+  });
+
+  const newestKeys =
+    Object.keys(cache)
+      .sort(function (left, right) {
+        return (
+          Number(
+            cache[right]?.updated_at ||
+            0
+          ) -
+          Number(
+            cache[left]?.updated_at ||
+            0
+          )
+        );
+      })
+      .slice(
+        0,
+        DH_ITEM_METADATA_MAX_ENTRIES
+      );
+
+  const limitedCache = {};
+
+  newestKeys.forEach(function (key) {
+    limitedCache[key] = cache[key];
+  });
+
+  await storageSet(
+    browser,
+    DH_ITEM_METADATA_STORAGE_KEY,
+    JSON.stringify(limitedCache)
+  );
+}
+
 function getItems(data) {
   const checkout = data.checkout || {};
   const cartLine = data.cartLine || {};
-  const productVariant = data.productVariant || cartLine.merchandise || {};
-  const product = productVariant.product || {};
+  const productVariant =
+    data.productVariant ||
+    cartLine.merchandise ||
+    {};
+  const product =
+    productVariant.product || {};
   const collection = data.collection || {};
 
-  if (Array.isArray(collection.productVariants)) {
-    return collection.productVariants.map((variant) => {
-      const variantProduct = variant.product || {};
+  if (
+    Array.isArray(
+      collection.productVariants
+    )
+  ) {
+    return collection.productVariants.map(
+      function (variant) {
+        const variantProduct =
+          variant.product || {};
 
-      return {
-        item_id: safeString(
-          variant.id ||
-          variantProduct.id
-        ),
-        item_name:
-          variantProduct.title ||
-          variant.title,
-        product_id: safeString(
-          variantProduct.id
-        ),
-        variant_id: safeString(
-          variant.id
-        ),
-        sku: safeString(
-          variant.sku
-        ),
-        price: cleanMoney(
-          variant.price?.amount
-        ),
-        quantity: 1,
-        currency:
-          variant.price?.currencyCode,
-      };
-    });
+        const price =
+          firstItemMoney(
+            variant.price?.amount
+          ) || 0;
+
+        const originalPrice =
+          firstItemMoney(
+            variant.compareAtPrice?.amount,
+            variant.compare_at_price?.amount
+          );
+
+        const discount =
+          originalPrice !== null &&
+          originalPrice > price
+            ? originalPrice - price
+            : 0;
+
+        return buildNormalizedItem({
+          itemId:
+            variant.id ||
+            variantProduct.id,
+          itemName:
+            variantProduct.title ||
+            variant.title,
+          itemBrand:
+            variantProduct.vendor ||
+            variantProduct.brand,
+          productId:
+            variantProduct.id,
+          variantId:
+            variant.id,
+          itemVariant:
+            variant.title ||
+            variant.sku ||
+            "",
+          price,
+          discount,
+          itemCategory:
+            getItemCategory(
+              variantProduct
+            ),
+          quantity: 1,
+          sku: variant.sku,
+          currency:
+            variant.price?.currencyCode,
+        });
+      }
+    );
   }
 
-  if (Array.isArray(checkout.lineItems)) {
-    return checkout.lineItems.map((line) => {
-      const variant = line.variant || line.merchandise || {};
-      const lineProduct = variant.product || {};
-      return {
-        item_id: safeString(variant.id || lineProduct.id || line.id),
-        item_name: lineProduct.title || variant.title || line.title,
-        product_id: safeString(lineProduct.id),
-        variant_id: safeString(variant.id),
-        sku: safeString(variant.sku || line.sku),
-        price: cleanMoney(line.finalLinePrice?.amount || line.cost?.totalAmount?.amount || variant.price?.amount),
-        quantity: cleanMoney(line.quantity) || 1,
-      };
-    });
+  if (
+    Array.isArray(checkout.lineItems)
+  ) {
+    return checkout.lineItems.map(
+      function (line) {
+        const variant =
+          line.variant ||
+          line.merchandise ||
+          {};
+
+        const lineProduct =
+          variant.product || {};
+
+        const quantity =
+          positiveItemQuantity(
+            line.quantity
+          );
+
+        const finalLineTotal =
+          firstItemMoney(
+            line.finalLinePrice?.amount,
+            line.cost?.totalAmount?.amount,
+            line.discountedTotal?.amount
+          );
+
+        const originalLineTotal =
+          firstItemMoney(
+            line.originalLinePrice?.amount,
+            line.cost?.subtotalAmount?.amount
+          );
+
+        const originalUnitPrice =
+          firstItemMoney(
+            variant.price?.amount,
+            line.price?.amount,
+            line.price
+          );
+
+        const discountTotal =
+          getLineDiscountTotal(line);
+
+        const unitPrice =
+          finalLineTotal !== null
+            ? finalLineTotal / quantity
+            : originalUnitPrice || 0;
+
+        let unitDiscount =
+          discountTotal > 0
+            ? discountTotal / quantity
+            : 0;
+
+        if (
+          unitDiscount === 0 &&
+          originalLineTotal !== null &&
+          finalLineTotal !== null &&
+          originalLineTotal >
+            finalLineTotal
+        ) {
+          unitDiscount =
+            (
+              originalLineTotal -
+              finalLineTotal
+            ) / quantity;
+        }
+
+        if (
+          unitDiscount === 0 &&
+          originalUnitPrice !== null &&
+          originalUnitPrice > unitPrice
+        ) {
+          unitDiscount =
+            originalUnitPrice -
+            unitPrice;
+        }
+
+        return buildNormalizedItem({
+          itemId:
+            variant.id ||
+            lineProduct.id ||
+            line.id,
+          itemName:
+            lineProduct.title ||
+            variant.title ||
+            line.title,
+          itemBrand:
+            lineProduct.vendor ||
+            lineProduct.brand ||
+            line.vendor,
+          productId:
+            lineProduct.id ||
+            line.productId ||
+            line.product_id,
+          variantId:
+            variant.id ||
+            line.variantId ||
+            line.variant_id,
+          itemVariant:
+            variant.title ||
+            line.variantTitle ||
+            line.variant_title ||
+            variant.sku ||
+            line.sku ||
+            "",
+          price: unitPrice,
+          discount: unitDiscount,
+          itemCategory:
+            getItemCategory(
+              lineProduct
+            ) ||
+            line.productType ||
+            line.product_type,
+          quantity,
+          sku:
+            variant.sku ||
+            line.sku,
+          currency:
+            line.finalLinePrice
+              ?.currencyCode ||
+            line.cost?.totalAmount
+              ?.currencyCode ||
+            checkout.currencyCode,
+        });
+      }
+    );
   }
 
-  const itemId = productVariant.id || product.id || cartLine.merchandise?.id;
-  const itemName = product.title || productVariant.title || cartLine.merchandise?.title;
+  const itemId =
+    productVariant.id ||
+    product.id ||
+    cartLine.merchandise?.id;
 
-  if (!itemId && !itemName) return [];
+  const itemName =
+    product.title ||
+    productVariant.title ||
+    cartLine.merchandise?.title;
+
+  if (!itemId && !itemName) {
+    return [];
+  }
+
+  const quantity =
+    positiveItemQuantity(
+      cartLine.quantity
+    );
+
+  const cartTotal =
+    firstItemMoney(
+      cartLine.cost?.totalAmount?.amount
+    );
+
+  const perQuantityPrice =
+    firstItemMoney(
+      cartLine.cost
+        ?.amountPerQuantity?.amount
+    );
+
+  const variantPrice =
+    firstItemMoney(
+      productVariant.price?.amount,
+      cartLine.merchandise
+        ?.price?.amount
+    );
+
+  const price =
+    perQuantityPrice !== null
+      ? perQuantityPrice
+      : cartTotal !== null
+        ? cartTotal / quantity
+        : variantPrice || 0;
+
+  const originalPrice =
+    firstItemMoney(
+      productVariant
+        .compareAtPrice?.amount,
+      productVariant
+        .compare_at_price?.amount,
+      cartLine.merchandise
+        ?.compareAtPrice?.amount
+    );
+
+  const discount =
+    originalPrice !== null &&
+    originalPrice > price
+      ? originalPrice - price
+      : 0;
 
   return [
-    {
-      item_id: safeString(itemId),
-      item_name: itemName,
-      product_id: safeString(product.id),
-      variant_id: safeString(productVariant.id || cartLine.merchandise?.id),
-      sku: safeString(productVariant.sku || cartLine.merchandise?.sku),
-      price: cleanMoney(productVariant.price?.amount || cartLine.cost?.totalAmount?.amount),
-      quantity: cleanMoney(cartLine.quantity) || 1,
-    },
+    buildNormalizedItem({
+      itemId,
+      itemName,
+      itemBrand:
+        product.vendor ||
+        product.brand,
+      productId:
+        product.id,
+      variantId:
+        productVariant.id ||
+        cartLine.merchandise?.id,
+      itemVariant:
+        productVariant.title ||
+        cartLine.merchandise?.title ||
+        productVariant.sku ||
+        cartLine.merchandise?.sku ||
+        "",
+      price,
+      discount,
+      itemCategory:
+        getItemCategory(product),
+      quantity,
+      sku:
+        productVariant.sku ||
+        cartLine.merchandise?.sku,
+      currency:
+        productVariant.price
+          ?.currencyCode ||
+        cartLine.cost?.totalAmount
+          ?.currencyCode,
+    }),
   ];
 }
 
@@ -860,7 +1589,18 @@ async function buildPayload(event, config, browser) {
       ? collection.productVariants
       : [];
 
-  const items = getItems(data);
+  let items = getItems(data);
+
+  items =
+    await enrichItemsWithStoredMetadata(
+      items,
+      browser
+    );
+
+  await persistItemMetadata(
+    items,
+    browser
+  );
 
   const collectionValue =
     collectionVariants.length
@@ -910,9 +1650,13 @@ async function buildPayload(event, config, browser) {
     undefined;
 
   const transactionId =
-    checkout.order?.id ||
-    checkout.token ||
-    undefined;
+    mapped.ga4 === "purchase" ||
+    mapped.ga4 === "refund"
+      ? cleanItemIdentifier(
+          checkout.order?.id ||
+          checkout.orderId
+        ) || undefined
+      : undefined;
   const attribution = await getAttribution(event, browser);
   const customer = await getCustomerForEvent(data, browser);
   const ecommerce = getEcommerce(data, value, currency, transactionId, items);
@@ -922,8 +1666,14 @@ async function buildPayload(event, config, browser) {
   const metaContentIds = metaContents.map((item) => item.id).filter(Boolean);
   const gaIdentity = await getGaIdentity(browser, event);
 
+  const normalizedEventId =
+    mapped.ga4 === "purchase" &&
+    transactionId
+      ? `shopify_order_${transactionId}`
+      : event.id;
+
   return {
-    event_id: event.id,
+    event_id: normalizedEventId,
     pixel_version: DH_PIXEL_VERSION,
     shop: getShop(event),
     original_event: event.name,
@@ -959,6 +1709,7 @@ async function buildPayload(event, config, browser) {
       session_id: gaIdentity.sessionId,
       shopify_client_id: gaIdentity.shopifyClientId,
       pixel_version: DH_PIXEL_VERSION,
+      shopify_event_id: event.id || undefined,
       checkout_token: checkout.token || undefined,
       checkout_id: checkout.id || undefined,
     },
@@ -995,6 +1746,11 @@ function buildGa4Url(payload, measurementId) {
   addParam(params, "ep.session_id", payload.session_id);
   addParam(params, "ep.original_event", payload.original_event);
 
+  if (payload.ga4_debug_mode === true) {
+    addParam(params, "ep.debug_mode", "true");
+    addParam(params, "_dbg", "1");
+  }
+
   if (payload.currency) {
     addParam(params, "cu", payload.currency);
   }
@@ -1012,10 +1768,14 @@ function buildGa4Url(payload, measurementId) {
   if (payload.items && payload.items.length) {
     payload.items.slice(0, 10).forEach((item, index) => {
       const n = index + 1;
-      addParam(params, `pr${n}id`, item.item_id);
+      addParam(params, `pr${n}id`, item.item_id || item.id);
       addParam(params, `pr${n}nm`, item.item_name);
+      addParam(params, `pr${n}br`, item.item_brand);
+      addParam(params, `pr${n}ca`, item.item_category);
+      addParam(params, `pr${n}va`, item.item_variant);
       addParam(params, `pr${n}pr`, item.price);
       addParam(params, `pr${n}qt`, item.quantity);
+      addParam(params, `pr${n}ds`, item.discount);
     });
   }
 
@@ -1097,18 +1857,24 @@ function getRemarketingItems(payload) {
 }
 
 function buildRemarketingProductId(item, itemIdFormat) {
-  const productId =
+  const rawProductId =
     item.product_id ||
     item.item_group_id ||
     item.id ||
     item.item_id ||
     "";
 
-  const variantId =
+  const rawVariantId =
     item.variant_id ||
     item.variantId ||
     item.sku ||
     "";
+
+  const productId =
+    cleanShopifyGid(rawProductId);
+
+  const variantId =
+    cleanShopifyGid(rawVariantId);
 
   if (itemIdFormat === "product_id") {
     return String(productId || item.item_id || "").trim();
@@ -1377,74 +2143,6 @@ function sendToGoogleAds(payload, config) {
 }
 
 
-function buildGa4ClientSeedUrl(payload, measurementId) {
-  var params = new URLSearchParams();
-
-  params.set("v", "2");
-  params.set("tid", measurementId);
-  params.set("cid", payload.client_id || "dh_client");
-
-  if (payload.session_id) {
-    params.set("sid", String(payload.session_id));
-  }
-
-  params.set("en", "dh_ga4_debug_seed");
-  params.set("_p", String(Date.now()));
-  params.set("_dbg", "1");
-  params.set("seg", "1");
-  params.set("dl", payload.page_location || "");
-  params.set("dt", payload.page_title || "");
-  params.set("dr", payload.page_referrer || "");
-  params.set("sr", "1920x1080");
-  params.set("ul", "en-us");
-
-  addParam(params, "ep.debug_mode", "true");
-  addParam(params, "ep.engagement_time_msec", "1");
-  addParam(params, "ep.event_id", String(payload.event_id || "seed") + "_ga4_seed");
-  addParam(params, "ep.session_id", payload.session_id);
-  addParam(params, "ep.source_event_name", payload.ga4_event || payload.original_event);
-
-  return GA4_COLLECT_URL + "?" + params.toString();
-}
-
-function sendGa4ClientSeed(payload, config) {
-  try {
-    var measurementId =
-      (config && config.ga4 && config.ga4.measurementId) ||
-      (config && config.pixels && config.pixels.ga4Id) ||
-      null;
-
-    var shouldSeed =
-      Boolean(measurementId) &&
-      config &&
-      config.ga4 &&
-      config.ga4.deliveryMode === "server" &&
-      config.ga4.testMode === true;
-
-    if (!shouldSeed) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 client seed skipped", {
-        pixelVersion: DH_PIXEL_VERSION,
-        measurementId: measurementId,
-        deliveryMode: config && config.ga4 ? config.ga4.deliveryMode : null,
-        testMode: config && config.ga4 ? config.ga4.testMode : null,
-      });
-      return;
-    }
-
-    var url = buildGa4ClientSeedUrl(payload, measurementId);
-
-    fetch(url, {
-      method: "GET",
-      mode: "no-cors",
-      keepalive: true,
-    });
-
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 client seed sent", measurementId, payload.client_id, payload.session_id);
-  } catch (e) {
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] GA4 client seed error", e);
-  }
-}
-
 function sendToGa4(payload, config) {
   try {
     const measurementId =
@@ -1474,7 +2172,7 @@ function sendToGa4(payload, config) {
     }
 
     const url = buildGa4Url(
-      payload,
+      { ...payload, ga4_debug_mode: config?.ga4?.testMode === true },
       measurementId
     );
 
@@ -1809,6 +2507,7 @@ register(({ analytics, browser, settings }) => {
     "cart_viewed",
     "checkout_started",
     "checkout_contact_info_submitted",
+    "checkout_address_info_submitted",
     "checkout_shipping_info_submitted",
     "payment_info_submitted",
     "checkout_completed",
@@ -1819,7 +2518,10 @@ register(({ analytics, browser, settings }) => {
         const shop =
           (settings && settings.shop_domain) ||
           getShop(event);
-        const config = await getConfig(shop);
+        // Shopify pixel settings are the authoritative, checkout-safe client
+        // configuration. The endpoint remains only as a legacy fallback for
+        // installations that have not yet refreshed their pixel.
+        const config = configFromPixelSettings(settings) || await getConfig(shop);
         const payload = {
           ...(await buildPayload(event, config, browser)),
           shop,
@@ -1834,8 +2536,6 @@ register(({ analytics, browser, settings }) => {
         const clientDeliveries = [];
 
         sendToMetaPixel(payload, config);
-        sendGa4ClientSeed(payload, config);
-
         const ga4ClientDelivery =
           sendToGa4(payload, config);
 
@@ -1871,7 +2571,8 @@ register(({ analytics, browser, settings }) => {
 
         await sendToServer(
           serverPayload,
-          settings && settings.ingest_key
+          settings && settings.ingest_key,
+          settings && settings.ingestion_endpoint
         );
       } catch (e) {
         DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel Error]", eventName, e);

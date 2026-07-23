@@ -2,6 +2,7 @@
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
 import { claimEventProcessing } from "../lib/utils/deduplication.server";
 import { createEventDeliveryLog } from "../services/event-delivery-log.server";
+import { persistShopifyCheckoutCorrelation } from "../services/shopify-checkout-correlation.server";
 import { normalizeIncomingEvent } from "../services/normalize-event.server";
 import {
   assertSubmittedShopMatches,
@@ -103,6 +104,12 @@ export async function action({ request }: ActionFunctionArgs) {
     assertSubmittedShopMatches(getSubmittedShop(payload), installation.shop);
 
     const event = normalizeIncomingEvent(payload);
+
+    await persistShopifyCheckoutCorrelation({
+      shop: installation.shop,
+      event,
+    });
+
     const deduplicationId = `pixel:${installation.installationId}:${event.event_id}`;
     const claimed = await claimEventProcessing(deduplicationId);
 

@@ -23,6 +23,8 @@ import { saveGoogleConversionConfig } from "../services/google-conversion-config
 import { createMerchantCenterFeed } from "../services/merchant-center-feed.server";
 import {
   getAssetSelections,
+  getAssetSelectionLabels,
+  deleteAssetSelection,
   saveAssetSelection,
 } from "../services/asset-selection.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
@@ -38,6 +40,17 @@ import {
   getGoogleAdsAccounts,
   getMerchantCenters,
 } from "../services/oauth/google.server";
+import {
+  formatGa4PropertyLabel,
+  Ga4DiscoveryError,
+  reconcileGa4Selection,
+} from "../services/ga4-property-discovery.server";
+import {
+  getGa4ApiSecretTitleColor,
+  getGa4EmptyOptionText,
+  getGa4PropertyDisplayOptions,
+  isGa4ApiSecretConfigured,
+} from "../services/ga4-settings-display";
 import { getMetaBusinessPortfolios, getMetaDatasetsForBusiness } from "../services/oauth/meta.server";
 
 import { getTestModeSettings, saveTestModeSettings } from "../services/test-mode.server";
@@ -48,6 +61,12 @@ import {
   removeServerSideSettings,
 } from "../services/subscription.server";
 import { verifyShopifyAppPricingSubscription } from "../services/shopify-app-pricing.server";
+import {
+  deactivateEventIngestPixel,
+  getEventIngestPixelStatus,
+  synchronizeWebPixelSettings,
+} from "../services/shopify-web-pixel.server";
+import { encryptToken } from "../lib/encryption.server";
 async function withTimeout<T>(
   promise: Promise<T>,
   fallback: T,
@@ -80,9 +99,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const workspace = await getOrCreateShopWorkspace(session.shop);
   const savedConnections = await getWorkspaceConnections(workspace.id);
   const savedAssetSelections = await getAssetSelections(workspace.id);
+  const savedAssetSelectionLabels = await getAssetSelectionLabels(workspace.id);
   const ga4DeliverySettings = await getGa4DeliverySettings(workspace.id);
   const testModeSettings = await getTestModeSettings(workspace.id);
+  const webPixelStatus = await getEventIngestPixelStatus(
+    session.shop,
+    admin,
+  );
   const savedGa4PropertyId = savedAssetSelections["google:GA4 Property"] || "";
+  let ga4AssetMessage = "";
   const url = new URL(request.url);
   const redirectedPlanHandle =
     url.searchParams.get("plan_handle");
@@ -201,39 +226,65 @@ export async function loader({ request }: LoaderFunctionArgs) {
       }));
 
       if (shouldLoadGa4Assets) {
-        const ga4Properties = await withTimeout(
-          withGoogleAccessTokenRetry(
+        try {
+          const ga4Properties = await withGoogleAccessTokenRetry(
             googleConnection,
             (accessToken) =>
               getGoogleAnalyticsProperties(accessToken)
-          ),
-          [],
-          8000
-        );
-
-        assets.google.ga4Properties = ga4Properties.map((property) => ({
-          value: property.propertyId,
-          label: `${property.displayName || "GA4 Property"} (${property.propertyId})`,
-        }));
-
-        if (savedGa4PropertyId) {
-          const ga4DataStreams = await withTimeout(
-            withGoogleAccessTokenRetry(
-              googleConnection,
-              (accessToken) =>
-                getGoogleAnalyticsDataStreams(
-                  accessToken,
-                  savedGa4PropertyId
-                )
-            ),
-            [],
-            8000
           );
 
-          assets.google.ga4DataStreams = ga4DataStreams.map((stream) => ({
-            value: stream.measurementId,
-            label: `${stream.displayName || "GA4 Data Stream"} (${stream.measurementId})`,
+          assets.google.ga4Properties = ga4Properties.map((property) => ({
+            value: property.propertyId,
+            label: formatGa4PropertyLabel(property),
           }));
+
+          const selection = reconcileGa4Selection(
+            savedGa4PropertyId,
+            ga4Properties
+          );
+
+          if (selection.stale) {
+            await deleteAssetSelection({
+              workspaceId: workspace.id,
+              platform: "google",
+              assetType: "GA4 Property",
+            });
+            delete savedAssetSelections["google:GA4 Property"];
+            ga4AssetMessage =
+              "The previously selected GA4 property is no longer accessible. Choose a property to continue.";
+          } else if (ga4Properties.length === 0) {
+            ga4AssetMessage =
+              "No GA4 properties are accessible to this Google account.";
+          }
+
+          if (selection.selectedPropertyId) {
+            const ga4DataStreams = await withTimeout(
+              withGoogleAccessTokenRetry(
+                googleConnection,
+                (accessToken) =>
+                  getGoogleAnalyticsDataStreams(
+                    accessToken,
+                    selection.selectedPropertyId
+                  )
+              ),
+              [],
+              8000
+            );
+
+            assets.google.ga4DataStreams = ga4DataStreams.map((stream) => ({
+              value: stream.measurementId,
+              label: `${stream.displayName || "GA4 Data Stream"} (${stream.measurementId})`,
+            }));
+          }
+        } catch (error) {
+          const status = error instanceof Ga4DiscoveryError ? error.status : 0;
+          const category =
+            error instanceof Ga4DiscoveryError ? error.category : "api_error";
+          console.warn("[GA4 Discovery] Failed", { status, category });
+          ga4AssetMessage =
+            error instanceof Ga4DiscoveryError
+              ? error.message
+              : "Google Analytics properties could not be loaded. Try reconnecting Google.";
         }
       }
     }
@@ -330,9 +381,16 @@ id: true,
       linkedin: getStatus("LINKEDIN"),
     },
     assets,
-    savedAssetSelections,
+    ga4AssetMessage,
+    savedAssetSelections: {
+      ...savedAssetSelections,
+      ["meta:Meta Test Event Code"]: savedAssetSelections["meta:Meta Test Event Code"] && savedAssetSelections["meta:Meta Test Event Code"] !== "none" ? "__configured__" : "none",
+      ["meta:Meta CAPI Access Token"]: savedAssetSelections["meta:Meta CAPI Access Token"] ? "__configured__" : "",
+    },
+    savedAssetSelectionLabels,
     ga4DeliverySettings,
     testModeSettings,
+    webPixelStatus,
     googleAdsConversionActions,
   };
 }
@@ -347,6 +405,50 @@ export async function action({ request }: ActionFunctionArgs) {
   const actionType = String(formData.get("_action") || "");
   const entitlementError =
     "Your Core Starter plan includes client-side tracking only. Upgrade to Core Server to enable GA4 server-side, Google Ads server-side, or Meta CAPI delivery.";
+  const synchronizePixel = async () => {
+    try {
+      await synchronizeWebPixelSettings({ shop: session.shop, admin });
+      return null;
+    } catch (error) {
+      return Response.json({
+        ok: false,
+        saved: true,
+        syncFailed: true,
+        retryAvailable: true,
+        warning: "Configuration was saved, but Shopify web pixel synchronization failed. Activate or refresh the web pixel before testing the storefront.",
+        error:
+          error instanceof Error
+            ? error.message
+            : "Web pixel synchronization failed.",
+      }, { status: 200 });
+    }
+  };
+
+  if (actionType === "deactivate_web_pixel") {
+    try {
+      const result = await deactivateEventIngestPixel({
+        shop: session.shop,
+        admin,
+      });
+
+      return Response.json({
+        ok: true,
+        pixelDeactivated: true,
+        message: result.deleted
+          ? "Web pixel deactivated successfully."
+          : "The web pixel was already inactive.",
+      });
+    } catch (error) {
+      return Response.json({
+        ok: false,
+        pixelDeactivated: false,
+        error:
+          error instanceof Error
+            ? error.message
+            : "Web pixel deactivation failed.",
+      });
+    }
+  }
 
   const requestedServerSide =
     (actionType === "save_asset_selection" &&
@@ -369,11 +471,21 @@ export async function action({ request }: ActionFunctionArgs) {
 
   if (actionType === "save_test_mode") {
     const enabled = String(formData.get("enabled") || "") === "true";
+    const selectedChannels = formData.getAll("selectedChannels").map(String);
+    const overrides = Object.fromEntries(
+      ["ga4_client", "ga4_server", "google_ads_client", "google_ads_server", "meta_pixel", "meta_capi"]
+        .map((channel) => [channel, String(formData.get(`override:${channel}`) || "GLOBAL")]),
+    );
 
     await saveTestModeSettings({
       workspaceId: workspace.id,
       enabled,
+      selectedChannels,
+      overrides,
     });
+
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
 
     return Response.json({
       ok: true,
@@ -405,6 +517,9 @@ export async function action({ request }: ActionFunctionArgs) {
       assetValue,
       assetLabel,
     });
+
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
 
     return Response.json({
       ok: true,
@@ -463,13 +578,15 @@ export async function action({ request }: ActionFunctionArgs) {
       assetLabel: serverSideEnabled ? "Enabled" : "Disabled",
     });
 
-    await saveAssetSelection({
-      workspaceId: workspace.id,
-      platform: "meta",
-      assetType: "Meta Test Event Code",
-      assetValue: testEventCode || "none",
-      assetLabel: testEventCode || "No test event code",
-    });
+    if (testEventCode && testEventCode !== "__configured__") {
+      await saveAssetSelection({
+        workspaceId: workspace.id,
+        platform: "meta",
+        assetType: "Meta Test Event Code",
+        assetValue: `enc:v1:${encryptToken(testEventCode)}`,
+        assetLabel: "Test event code configured",
+      });
+    }
 
     await saveAssetSelection({
       workspaceId: workspace.id,
@@ -484,10 +601,13 @@ export async function action({ request }: ActionFunctionArgs) {
         workspaceId: workspace.id,
         platform: "meta",
         assetType: "Meta CAPI Access Token",
-        assetValue: capiAccessToken,
+        assetValue: `enc:v1:${encryptToken(capiAccessToken)}`,
         assetLabel: `Saved token ending ${capiAccessToken.slice(-6)}`,
       });
     }
+
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
 
     return Response.json({
       ok: true,
@@ -517,11 +637,14 @@ export async function action({ request }: ActionFunctionArgs) {
     }
 
     const existingGa4Settings = await getGa4DeliverySettings(workspace.id);
+    const existingSecretConfiguredForMeasurement =
+      existingGa4Settings.credential?.assetId === measurementId &&
+      existingGa4Settings.credential.tokenStatus === "configured";
 
     if (
       deliveryMode === "server" &&
       !apiSecret &&
-      existingGa4Settings.credential?.tokenStatus !== "configured"
+      !existingSecretConfiguredForMeasurement
     ) {
       return Response.json(
         { ok: false, error: "GA4 API Secret is required for server-side delivery" },
@@ -529,7 +652,7 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    await saveGa4DeliverySettings({
+    const savedGa4Settings = await saveGa4DeliverySettings({
       workspaceId: workspace.id,
       propertyId,
       measurementId,
@@ -537,9 +660,14 @@ export async function action({ request }: ActionFunctionArgs) {
       apiSecret: apiSecret || undefined,
     });
 
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
+
     return Response.json({
       ok: true,
       message: "GA4 delivery settings saved.",
+      apiSecretConfigured:
+        savedGa4Settings.credential.tokenStatus === "configured",
     });
   }
 
@@ -656,6 +784,9 @@ export async function action({ request }: ActionFunctionArgs) {
       events,
     });
 
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
+
     return Response.json({
       ok: true,
       message: conversionActionRecordId
@@ -731,6 +862,9 @@ export async function action({ request }: ActionFunctionArgs) {
         });
       }
     }
+
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
 
     return Response.json({
       ok: true,
@@ -902,10 +1036,13 @@ export default function ConfigurationPage() {
     navQuery,
     connections,
     assets,
+    ga4AssetMessage,
     unlockPlatform,
     savedAssetSelections,
+    savedAssetSelectionLabels,
     ga4DeliverySettings,
     testModeSettings,
+    webPixelStatus,
     googleAdsConversionActions,
   } = useLoaderData<typeof loader>();
   const location = useLocation();
@@ -1018,7 +1155,7 @@ export default function ConfigurationPage() {
   const metaServerSideEnabled =
     selectedAssets["meta:Meta Server Side Enabled"] === "true";
   const metaTestEventCode =
-    selectedAssets["meta:Meta Test Event Code"] === "none"
+    selectedAssets["meta:Meta Test Event Code"] === "none" || selectedAssets["meta:Meta Test Event Code"] === "__configured__"
       ? ""
       : selectedAssets["meta:Meta Test Event Code"] || "";
 
@@ -1052,9 +1189,27 @@ export default function ConfigurationPage() {
     | undefined;
   const ga4DeliveryFetcher = useFetcher();
   const ga4DeliveryResult = ga4DeliveryFetcher.data as
-    | { ok?: boolean; error?: string; message?: string }
+    | { ok?: boolean; error?: string; message?: string; apiSecretConfigured?: boolean }
     | undefined;
   const testModeFetcher = useFetcher();
+  const pixelFetcher = useFetcher();
+  const pixelResult = pixelFetcher.data as
+    | {
+        ok?: boolean;
+        pixelDeactivated?: boolean;
+        message?: string;
+        error?: string;
+      }
+    | undefined;
+
+  const pixelExists = Boolean(
+    webPixelStatus?.pixelExists,
+  );
+
+  const pixelConnected = Boolean(
+    webPixelStatus?.pixelExists &&
+      webPixelStatus?.ingestKeyConfigured,
+  );
   const testModeResult = testModeFetcher.data as
     | { ok?: boolean; error?: string; message?: string; testModeEnabled?: boolean }
     | undefined;
@@ -1084,6 +1239,9 @@ export default function ConfigurationPage() {
 
   const ga4PropertyValue =
     selectedAssets["google:GA4 Property"] || "";
+  const ga4ApiSecretConfigured =
+    ga4DeliveryResult?.apiSecretConfigured ??
+    isGa4ApiSecretConfigured(ga4DeliverySettings?.credential?.tokenStatus);
   const googleAdsAccountValue =
     selectedAssets["google:Google Ads Account / Manager Account"] || "";
   const merchantCenterValue =
@@ -1520,10 +1678,9 @@ export default function ConfigurationPage() {
           }}
         >
           <div>
-            <h2 style={styles.sectionTitle}>Test Mode</h2>
+            <h2 style={styles.sectionTitle}>Test / Debug Mode</h2>
             <p style={{ margin: "6px 0 0", color: "#4b5563", lineHeight: 1.6 }}>
-              Enable Test Mode before installing on a live store. Events will be collected,
-              validated, and logged safely before live platform sending.
+              Use platform-specific testing and validation methods. Test behavior differs by platform.
             </p>
           </div>
 
@@ -1570,11 +1727,15 @@ export default function ConfigurationPage() {
               name="enabled"
               value="true"
               checked={testModeEnabled}
-              onChange={(event) => setTestModeEnabled(event.currentTarget.checked)}
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                if (checked && !window.confirm("Enable Test / Debug Mode?\n\nPlatform behavior differs. Google Ads validation requests will not be recorded, while some platforms may still process events. Disable test mode after testing.")) return;
+                setTestModeEnabled(checked);
+              }}
               style={{ marginTop: 3 }}
             />
             <span>
-              Enable Test Mode
+              Enable Test / Debug Mode
               <small
                 style={{
                   display: "block",
@@ -1584,11 +1745,41 @@ export default function ConfigurationPage() {
                   lineHeight: 1.5,
                 }}
               >
-                When enabled, the app should validate and log events before live sending.
-                Public URLs or browser payloads cannot control this setting.
+                Platform behavior differs. Google Ads validation requests will not be recorded, while some platforms may still process events. Disable test mode after testing.
               </small>
             </span>
           </label>
+
+          <div style={{ display: "grid", gap: 10 }}>
+            {[
+              ["GA4", [["ga4_client", "Client-side"], ["ga4_server", "Server-side Measurement Protocol"]]],
+              ["Google Ads", [["google_ads_client", "Client-side"], ["google_ads_server", "Server-side Data Manager API"]]],
+              ["Meta", [["meta_pixel", "Meta Pixel"], ["meta_capi", "Meta Conversions API"]]],
+            ].map(([platform, channels]) => (
+              <div key={String(platform)} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 }}>
+                <strong>{platform}</strong>
+                {(channels as string[][]).map(([channel, label]) => {
+                  const saved = testModeSettings?.channels?.[channel];
+                  return <div key={channel} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, marginTop: 8 }}>
+                    <label><input type="checkbox" name="selectedChannels" value={channel} defaultChecked={Boolean(saved?.selected)} /> {label}</label>
+                    <select name={`override:${channel}`} defaultValue={saved?.override || "GLOBAL"}>
+                      <option value="GLOBAL">Use Global Test Mode</option>
+                      <option value="ENABLED">Enabled</option>
+                      <option value="DISABLED">Disabled</option>
+                    </select>
+                  </div>;
+                })}
+              </div>
+            ))}
+            {["TikTok", "Pinterest", "Microsoft Ads", "Snapchat", "LinkedIn"].map((platform) => (
+              <div key={platform} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 }}>
+                <strong>{platform}</strong> — Not currently supported
+              </div>
+            ))}
+          </div>
+
+          <p style={{ margin: 0, color: "#4b5563" }}>GA4 debug events appear in DebugView. They may still enter reporting unless developer traffic is filtered or a separate test property is used.</p>
+          <p style={{ margin: 0, color: "#4b5563" }}>Meta test events may still be processed by Meta. Use test values, a test data source, or a dedicated test setup.</p>
 
           {testModeResult?.message && (
             <div
@@ -1624,24 +1815,97 @@ export default function ConfigurationPage() {
 
       <section style={styles.statusBox}>
         <h2 style={styles.sectionTitle}>Web Pixel Status</h2>
+
         <div style={styles.statusGrid}>
           <div style={styles.statusRow}>
             <span>Shop</span>
             <strong>{shop}</strong>
           </div>
+
           <div style={styles.statusRow}>
             <span>Pixel Status</span>
-            <strong>Active / Connected</strong>
+
+            <strong
+              style={
+                pixelConnected
+                  ? styles.pixelStatusConnected
+                  : styles.pixelStatusDisconnected
+              }
+            >
+              {pixelConnected
+                ? "Active / Connected"
+                : "Not Active / Not Connected"}
+            </strong>
           </div>
         </div>
 
+        {pixelExists && !pixelConnected ? (
+          <p style={styles.pixelWarningText}>
+            The Shopify pixel exists, but its installation
+            settings need to be refreshed.
+          </p>
+        ) : null}
+
+        {pixelResult?.message ? (
+          <p style={styles.pixelSuccessText}>
+            {pixelResult.message}
+          </p>
+        ) : null}
+
+        {pixelResult?.error ? (
+          <p style={styles.pixelErrorText}>
+            {pixelResult.error}
+          </p>
+        ) : null}
+
         <div style={styles.buttonRow}>
-          <Link to={withNav("/app/activate-pixel")} style={styles.primaryButton}>
-            Activate Pixel
+          <Link
+            to={withNav("/app/activate-pixel")}
+            style={styles.primaryButton}
+          >
+            {pixelExists ? "Refresh Pixel" : "Activate Pixel"}
           </Link>
-          <button type="button" style={styles.secondaryButton}>
-            Deactivate Coming Soon
-          </button>
+
+          {pixelExists ? (
+            <pixelFetcher.Form
+              method="post"
+              onSubmit={(event) => {
+                const confirmed = window.confirm(
+                  "Deactivate the DH Conversions web pixel? Storefront browser events will stop until it is activated again.",
+                );
+
+                if (!confirmed) {
+                  event.preventDefault();
+                }
+              }}
+            >
+              <input
+                type="hidden"
+                name="_action"
+                value="deactivate_web_pixel"
+              />
+
+              <button
+                type="submit"
+                disabled={pixelFetcher.state !== "idle"}
+                style={{
+                  ...styles.dangerButton,
+                  cursor:
+                    pixelFetcher.state === "idle"
+                      ? "pointer"
+                      : "not-allowed",
+                  opacity:
+                    pixelFetcher.state === "idle"
+                      ? 1
+                      : 0.7,
+                }}
+              >
+                {pixelFetcher.state === "idle"
+                  ? "Deactivate Pixel"
+                  : "Deactivating..."}
+              </button>
+            </pixelFetcher.Form>
+          ) : null}
         </div>
       </section>
 
@@ -1887,7 +2151,15 @@ export default function ConfigurationPage() {
                         const isLocked = isLockedAssetField(platform.key, field, selectedValue);
                         const isDisabled = isLocked;
                         const displayOptions =
-                          selectedValue && !options.some((option) => option.value === selectedValue)
+                          field === "GA4 Property"
+                            ? getGa4PropertyDisplayOptions({
+                                savedPropertyId: selectedValue,
+                                savedPropertyLabel:
+                                  savedAssetSelectionLabels?.[key],
+                                discoveredProperties: options,
+                                locked: isLocked,
+                              })
+                            : selectedValue && !options.some((option) => option.value === selectedValue)
                             ? [
                                 {
                                   value: selectedValue,
@@ -2012,7 +2284,11 @@ export default function ConfigurationPage() {
                                 }
                               >
                                 <option value="">
-                                  {displayOptions.length ? `Select ${field}` : getEmptyOptionText(platform.key, field)}
+                                  {displayOptions.length
+                                    ? `Select ${field}`
+                                    : field === "GA4 Property"
+                                      ? getGa4EmptyOptionText(Boolean(selectedValue))
+                                      : getEmptyOptionText(platform.key, field)}
                                 </option>
 
                                 {displayOptions.map((option) => (
@@ -2037,6 +2313,12 @@ export default function ConfigurationPage() {
                             )}
 
                             {platform.key === "google" && field === "GA4 Property" && (
+                              <>
+                              {ga4AssetMessage && (
+                                <small style={{ color: "#92400e", lineHeight: 1.5 }}>
+                                  {ga4AssetMessage}
+                                </small>
+                              )}
                               <button
                                 type="button"
                                 style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
@@ -2045,6 +2327,7 @@ export default function ConfigurationPage() {
                               >
                                 Configuration
                               </button>
+                              </>
                             )}
 
                             {platform.key === "google" && field === "Google Ads Account / Manager Account" && (
@@ -2256,7 +2539,7 @@ export default function ConfigurationPage() {
                 }}
               />
               <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                Use this only for testing CAPI events in Meta Events Manager later.
+                {selectedAssets["meta:Meta Test Event Code"] === "__configured__" ? "Test code configured. Enter a new value only to replace it." : "Use this only for testing CAPI events in Meta Events Manager later."}
               </small>
             </label>
 
@@ -2683,13 +2966,20 @@ export default function ConfigurationPage() {
 
             {ga4DeliveryMode === "server" && (
               <label style={styles.label}>
-                GA4 API Secret
+                <span
+                  style={{
+                    color: getGa4ApiSecretTitleColor(ga4ApiSecretConfigured),
+                  }}
+                >
+                  GA4 API Secret
+                  {ga4ApiSecretConfigured ? " · Saved" : ""}
+                </span>
                 <input
                   style={styles.input}
                   name="apiSecret"
                   type="password"
                   placeholder={
-                    ga4DeliverySettings?.credential?.tokenStatus === "configured"
+                    ga4ApiSecretConfigured
                       ? "Already saved. Leave blank to keep existing secret."
                       : "Paste GA4 Measurement Protocol API Secret"
                   }
@@ -3440,6 +3730,48 @@ const styles: Record<string, CSSProperties> = {
     padding: "10px 14px",
     cursor: "pointer",
     fontWeight: 700,
+  },
+  dangerButton: {
+    background: "#b91c1c",
+    color: "#fff",
+    border: 0,
+    borderRadius: 10,
+    padding: "10px 14px",
+    cursor: "pointer",
+    fontWeight: 700,
+  },
+  pixelStatusConnected: {
+    display: "inline-block",
+    padding: "4px 10px",
+    borderRadius: 999,
+    background: "#dcfce7",
+    color: "#166534",
+    border: "1px solid #86efac",
+    fontSize: 13,
+  },
+  pixelStatusDisconnected: {
+    display: "inline-block",
+    padding: "4px 10px",
+    borderRadius: 999,
+    background: "#fee2e2",
+    color: "#991b1b",
+    border: "1px solid #fca5a5",
+    fontSize: 13,
+  },
+  pixelWarningText: {
+    margin: "12px 0 0",
+    color: "#92400e",
+    fontWeight: 600,
+  },
+  pixelSuccessText: {
+    margin: "12px 0 0",
+    color: "#166534",
+    fontWeight: 600,
+  },
+  pixelErrorText: {
+    margin: "12px 0 0",
+    color: "#991b1b",
+    fontWeight: 600,
   },
   statusBox: {
     marginTop: 28,

@@ -1,6 +1,5 @@
 // TikTok Events API Dispatcher
 import type { UnifiedEvent } from "../events/event-schema";
-import axios from "axios";
 
 /**
  * Dispatch event to TikTok Events API
@@ -9,6 +8,8 @@ export async function dispatchToTikTok(
   event: UnifiedEvent,
   workspaceId: string
 ): Promise<{ success: boolean; message?: string }> {
+  void workspaceId;
+
   try {
     // Get TikTok credentials
     const tiktokEvent = mapToTikTokFormat(event);
@@ -33,7 +34,14 @@ function mapToTikTokFormat(event: UnifiedEvent) {
       ip: event.user_data.ip_address,
     },
     properties: {
-      contents: event.ecommerce?.items,
+      contents: event.ecommerce?.items.map((item) => ({
+        content_id: item.id || item.item_id,
+        content_name: item.item_name,
+        content_category: item.item_category,
+        brand: item.item_brand,
+        price: item.price,
+        quantity: item.quantity,
+      })),
       value: event.ecommerce?.value,
       currency: event.ecommerce?.currency,
     },
