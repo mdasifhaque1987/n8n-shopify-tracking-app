@@ -39,16 +39,6 @@ name = "GA4 Measurement ID"
 description = "Public GA4 web stream identifier"
 type = "single_line_text_field"
 
-[settings.fields.ga4_debug_enabled]
-name = "GA4 DebugView enabled"
-description = "Managed GA4 DebugView testing state"
-type = "single_line_text_field"
-
-[settings.fields.ga4_item_id_format]
-name = "GA4 Item ID format"
-description = "Managed GA4 ecommerce item identifier format"
-type = "single_line_text_field"
-
 [settings.fields.meta_enabled]
 name = "Meta Pixel enabled"
 description = "Managed Meta Pixel delivery state"
@@ -62,4 +52,9 @@ type = "single_line_text_field"
 [settings.fields.client_event_settings]
 name = "Client event settings"
 description = "Managed JSON event selections"
+type = "single_line_text_field"
+
+[settings.fields.test_mode_settings]
+name = "Test mode settings"
+description = "Managed JSON client-channel test state"
 type = "single_line_text_field"

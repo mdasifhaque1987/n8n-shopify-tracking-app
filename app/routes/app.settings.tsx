@@ -52,6 +52,8 @@ import {
   isGa4ApiSecretConfigured,
 } from "../services/ga4-settings-display";
 import { getMetaBusinessPortfolios, getMetaDatasetsForBusiness } from "../services/oauth/meta.server";
+
+import { getTestModeSettings, saveTestModeSettings } from "../services/test-mode.server";
 import {
   getShopEntitlements,
   getShopSubscription,
@@ -99,6 +101,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const savedAssetSelections = await getAssetSelections(workspace.id);
   const savedAssetSelectionLabels = await getAssetSelectionLabels(workspace.id);
   const ga4DeliverySettings = await getGa4DeliverySettings(workspace.id);
+  const testModeSettings = await getTestModeSettings(workspace.id);
   const webPixelStatus = await getEventIngestPixelStatus(
     session.shop,
     admin,
@@ -386,6 +389,7 @@ id: true,
     },
     savedAssetSelectionLabels,
     ga4DeliverySettings,
+    testModeSettings,
     webPixelStatus,
     googleAdsConversionActions,
   };
@@ -453,10 +457,7 @@ export async function action({ request }: ActionFunctionArgs) {
     (actionType === "save_meta_dataset_settings" &&
       String(formData.get("serverSideEnabled") || "") === "true") ||
     (actionType === "save_ga4_delivery_settings" &&
-      String(
-        formData.get("deliveryMode") ||
-        ""
-      ) === "server") ||
+      String(formData.get("deliveryMode") || "") === "server") ||
     (actionType === "save_google_conversions" &&
       String(formData.get("deliveryMode") || "") === "server");
 
@@ -467,6 +468,34 @@ export async function action({ request }: ActionFunctionArgs) {
       return Response.json({ ok: false, error: entitlementError }, { status: 403 });
     }
   }
+
+  if (actionType === "save_test_mode") {
+    const enabled = String(formData.get("enabled") || "") === "true";
+    const selectedChannels = formData.getAll("selectedChannels").map(String);
+    const overrides = Object.fromEntries(
+      ["ga4_client", "ga4_server", "google_ads_client", "google_ads_server", "meta_pixel", "meta_capi"]
+        .map((channel) => [channel, String(formData.get(`override:${channel}`) || "GLOBAL")]),
+    );
+
+    await saveTestModeSettings({
+      workspaceId: workspace.id,
+      enabled,
+      selectedChannels,
+      overrides,
+    });
+
+    const syncFailure = await synchronizePixel();
+    if (syncFailure) return syncFailure;
+
+    return Response.json({
+      ok: true,
+      testModeEnabled: enabled,
+      message: enabled
+        ? "Test Mode enabled. Events will be validated/logged before live sending."
+        : "Live Mode enabled. Events can be sent to selected platforms.",
+    });
+  }
+
 
   if (actionType === "save_asset_selection") {
     const platform = String(formData.get("platform") || "");
@@ -506,22 +535,7 @@ export async function action({ request }: ActionFunctionArgs) {
       String(formData.get("clientSideEnabled") || "false") === "true";
     const serverSideEnabled =
       String(formData.get("serverSideEnabled") || "false") === "true";
-    const testEventCode =
-      String(
-        formData.get(
-          "testEventCode",
-        ) ||
-        "",
-      ).trim();
-
-    const clearTestEventCode =
-      String(
-        formData.get(
-          "clearTestEventCode",
-        ) ||
-        "false",
-      ) === "true";
-
+    const testEventCode = String(formData.get("testEventCode") || "").trim();
     const contentIdFormat = String(formData.get("contentIdFormat") || "shopify_country_product_variant").trim();
     const capiAccessToken = String(formData.get("capiAccessToken") || "").trim();
 
@@ -564,34 +578,13 @@ export async function action({ request }: ActionFunctionArgs) {
       assetLabel: serverSideEnabled ? "Enabled" : "Disabled",
     });
 
-    if (clearTestEventCode) {
+    if (testEventCode && testEventCode !== "__configured__") {
       await saveAssetSelection({
-        workspaceId:
-          workspace.id,
+        workspaceId: workspace.id,
         platform: "meta",
-        assetType:
-          "Meta Test Event Code",
-        assetValue: "none",
-        assetLabel:
-          "No test event code",
-      });
-    } else if (
-      testEventCode &&
-      testEventCode !==
-        "__configured__"
-    ) {
-      await saveAssetSelection({
-        workspaceId:
-          workspace.id,
-        platform: "meta",
-        assetType:
-          "Meta Test Event Code",
-        assetValue:
-          `enc:v1:${encryptToken(
-            testEventCode,
-          )}`,
-        assetLabel:
-          "Test event code configured",
+        assetType: "Meta Test Event Code",
+        assetValue: `enc:v1:${encryptToken(testEventCode)}`,
+        assetLabel: "Test event code configured",
       });
     }
 
@@ -623,54 +616,11 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (actionType === "save_ga4_delivery_settings") {
-    const propertyId =
-      String(
-        formData.get("propertyId") ||
-        ""
-      );
-
-    const measurementId =
-      String(
-        formData.get("measurementId") ||
-        ""
-      ).trim();
-
-    const rawDeliveryMode =
-      String(
-        formData.get("deliveryMode") ||
-        ""
-      ).trim();
-
-    if (
-      rawDeliveryMode !== "client" &&
-      rawDeliveryMode !== "server"
-    ) {
-      return Response.json(
-        {
-          ok: false,
-          error:
-            "Select either client-side or server-side GA4 delivery.",
-        },
-        { status: 400 },
-      );
-    }
-
-    const deliveryMode =
-      rawDeliveryMode as
-        | "client"
-        | "server";
-
-    const debugMode =
-      String(
-        formData.get("debugMode") ||
-        ""
-      ) === "true";
-
-    const apiSecret =
-      String(
-        formData.get("apiSecret") ||
-        ""
-      ).trim();
+    const propertyId = String(formData.get("propertyId") || "");
+    const measurementId = String(formData.get("measurementId") || "").trim();
+    const rawDeliveryMode = String(formData.get("deliveryMode") || "client");
+    const deliveryMode = rawDeliveryMode === "server" ? "server" : "client";
+    const apiSecret = String(formData.get("apiSecret") || "").trim();
 
     if (!propertyId) {
       return Response.json(
@@ -707,12 +657,7 @@ export async function action({ request }: ActionFunctionArgs) {
       propertyId,
       measurementId,
       deliveryMode,
-      apiSecret:
-        apiSecret || undefined,
-      testCode:
-        debugMode
-          ? "debug_view"
-          : null,
+      apiSecret: apiSecret || undefined,
     });
 
     const syncFailure = await synchronizePixel();
@@ -720,10 +665,7 @@ export async function action({ request }: ActionFunctionArgs) {
 
     return Response.json({
       ok: true,
-      message:
-        debugMode
-          ? "GA4 delivery settings saved. DebugView testing is enabled."
-          : "GA4 delivery settings saved.",
+      message: "GA4 delivery settings saved.",
       apiSecretConfigured:
         savedGa4Settings.credential.tokenStatus === "configured",
     });
@@ -1099,6 +1041,7 @@ export default function ConfigurationPage() {
     savedAssetSelections,
     savedAssetSelectionLabels,
     ga4DeliverySettings,
+    testModeSettings,
     webPixelStatus,
     googleAdsConversionActions,
   } = useLoaderData<typeof loader>();
@@ -1212,26 +1155,9 @@ export default function ConfigurationPage() {
   const metaServerSideEnabled =
     selectedAssets["meta:Meta Server Side Enabled"] === "true";
   const metaTestEventCode =
-    selectedAssets[
-      "meta:Meta Test Event Code"
-    ] === "none" ||
-    selectedAssets[
-      "meta:Meta Test Event Code"
-    ] === "__configured__"
+    selectedAssets["meta:Meta Test Event Code"] === "none" || selectedAssets["meta:Meta Test Event Code"] === "__configured__"
       ? ""
-      : selectedAssets[
-          "meta:Meta Test Event Code"
-        ] || "";
-
-  const metaTestEventCodeConfigured =
-    selectedAssets[
-      "meta:Meta Test Event Code"
-    ] === "__configured__";
-
-  const [
-    metaClearTestEventCode,
-    setMetaClearTestEventCode,
-  ] = useState(false);
+      : selectedAssets["meta:Meta Test Event Code"] || "";
 
   const metaContentIdFormat =
     selectedAssets["meta:Meta Content ID Format"] || "shopify_country_product_variant";
@@ -1241,6 +1167,11 @@ export default function ConfigurationPage() {
 
   const metaCapiAccessTokenSaved =
     Boolean(selectedAssets["meta:Meta CAPI Access Token"]) || metaCapiAccessTokenSavedOverride;
+
+  const metaCapiAccessTokenLabel =
+    metaCapiAccessTokenSaved
+      ? "Access token saved"
+      : "No CAPI access token saved";
 
   const feedFetcher = useFetcher();
   const feedResult = feedFetcher.data as
@@ -1260,6 +1191,7 @@ export default function ConfigurationPage() {
   const ga4DeliveryResult = ga4DeliveryFetcher.data as
     | { ok?: boolean; error?: string; message?: string; apiSecretConfigured?: boolean }
     | undefined;
+  const testModeFetcher = useFetcher();
   const pixelFetcher = useFetcher();
   const pixelResult = pixelFetcher.data as
     | {
@@ -1278,21 +1210,12 @@ export default function ConfigurationPage() {
     webPixelStatus?.pixelExists &&
       webPixelStatus?.ingestKeyConfigured,
   );
-  const savedGa4DeliveryMode =
-    ga4DeliverySettings?.setting
-      ?.deliveryMode;
-
-  const initialGa4DeliveryMode =
-    savedGa4DeliveryMode === "client" ||
-    savedGa4DeliveryMode === "server"
-      ? savedGa4DeliveryMode
-      : "";
-
-  const [
-    ga4DeliveryMode,
-    setGa4DeliveryMode,
-  ] = useState(
-    initialGa4DeliveryMode,
+  const testModeResult = testModeFetcher.data as
+    | { ok?: boolean; error?: string; message?: string; testModeEnabled?: boolean }
+    | undefined;
+  const [testModeEnabled, setTestModeEnabled] = useState(Boolean(testModeSettings?.enabled));
+  const [ga4DeliveryMode, setGa4DeliveryMode] = useState(
+    ga4DeliverySettings?.setting?.deliveryMode === "server" ? "server" : "client"
   );
 
   // Reserved for the upcoming catalog/feed configuration UI.
@@ -1707,6 +1630,27 @@ export default function ConfigurationPage() {
           />
           <span>Configuration</span>
         </h1>
+        {testModeEnabled && (
+          <div
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              width: "fit-content",
+              marginTop: 12,
+              borderRadius: 999,
+              padding: "7px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: "#9a3412",
+              background: "#fed7aa",
+              border: "1px solid #fdba74",
+            }}
+          >
+            TEST MODE ACTIVE
+          </div>
+        )}
         <p style={styles.subtitle}>
           Select connected platform assets, configure conversions, and create catalog feeds.
         </p>
@@ -1715,6 +1659,158 @@ export default function ConfigurationPage() {
       <section style={styles.notice}>
         Tracking IDs, conversion labels, pixels, catalogs, and feed settings will be selected from connected platform accounts.
         Manual ID entry is not required.
+      </section>
+
+      <section
+        style={{
+          ...styles.statusBox,
+          borderColor: testModeEnabled ? "#fb923c" : "#d1d5db",
+          background: testModeEnabled ? "#fff7ed" : "white",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 16,
+            alignItems: "flex-start",
+            flexWrap: "wrap",
+          }}
+        >
+          <div>
+            <h2 style={styles.sectionTitle}>Test / Debug Mode</h2>
+            <p style={{ margin: "6px 0 0", color: "#4b5563", lineHeight: 1.6 }}>
+              Use platform-specific testing and validation methods. Test behavior differs by platform.
+            </p>
+          </div>
+
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              borderRadius: 999,
+              padding: "7px 12px",
+              fontSize: 12,
+              fontWeight: 800,
+              letterSpacing: "0.04em",
+              textTransform: "uppercase",
+              color: testModeEnabled ? "#9a3412" : "#166534",
+              background: testModeEnabled ? "#fed7aa" : "#dcfce7",
+              border: testModeEnabled ? "1px solid #fdba74" : "1px solid #86efac",
+            }}
+          >
+            {testModeEnabled ? "Test Mode Active" : "Live Mode"}
+          </span>
+        </div>
+
+        <testModeFetcher.Form
+          method="post"
+          style={{
+            marginTop: 18,
+            display: "grid",
+            gap: 12,
+          }}
+        >
+          <input type="hidden" name="_action" value="save_test_mode" />
+
+          <label
+            style={{
+              display: "flex",
+              gap: 10,
+              alignItems: "flex-start",
+              fontWeight: 700,
+              color: "#111827",
+            }}
+          >
+            <input
+              type="checkbox"
+              name="enabled"
+              value="true"
+              checked={testModeEnabled}
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                if (checked && !window.confirm("Enable Test / Debug Mode?\n\nPlatform behavior differs. Google Ads validation requests will not be recorded, while some platforms may still process events. Disable test mode after testing.")) return;
+                setTestModeEnabled(checked);
+              }}
+              style={{ marginTop: 3 }}
+            />
+            <span>
+              Enable Test / Debug Mode
+              <small
+                style={{
+                  display: "block",
+                  marginTop: 4,
+                  color: "#6b7280",
+                  fontWeight: 500,
+                  lineHeight: 1.5,
+                }}
+              >
+                Platform behavior differs. Google Ads validation requests will not be recorded, while some platforms may still process events. Disable test mode after testing.
+              </small>
+            </span>
+          </label>
+
+          <div style={{ display: "grid", gap: 10 }}>
+            {[
+              ["GA4", [["ga4_client", "Client-side"], ["ga4_server", "Server-side Measurement Protocol"]]],
+              ["Google Ads", [["google_ads_client", "Client-side"], ["google_ads_server", "Server-side Data Manager API"]]],
+              ["Meta", [["meta_pixel", "Meta Pixel"], ["meta_capi", "Meta Conversions API"]]],
+            ].map(([platform, channels]) => (
+              <div key={String(platform)} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 }}>
+                <strong>{platform}</strong>
+                {(channels as string[][]).map(([channel, label]) => {
+                  const saved = testModeSettings?.channels?.[channel];
+                  return <div key={channel} style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, marginTop: 8 }}>
+                    <label><input type="checkbox" name="selectedChannels" value={channel} defaultChecked={Boolean(saved?.selected)} /> {label}</label>
+                    <select name={`override:${channel}`} defaultValue={saved?.override || "GLOBAL"}>
+                      <option value="GLOBAL">Use Global Test Mode</option>
+                      <option value="ENABLED">Enabled</option>
+                      <option value="DISABLED">Disabled</option>
+                    </select>
+                  </div>;
+                })}
+              </div>
+            ))}
+            {["TikTok", "Pinterest", "Microsoft Ads", "Snapchat", "LinkedIn"].map((platform) => (
+              <div key={platform} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 }}>
+                <strong>{platform}</strong> — Not currently supported
+              </div>
+            ))}
+          </div>
+
+          <p style={{ margin: 0, color: "#4b5563" }}>GA4 debug events appear in DebugView. They may still enter reporting unless developer traffic is filtered or a separate test property is used.</p>
+          <p style={{ margin: 0, color: "#4b5563" }}>Meta test events may still be processed by Meta. Use test values, a test data source, or a dedicated test setup.</p>
+
+          {testModeResult?.message && (
+            <div
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                color: testModeResult.ok ? "#166534" : "#991b1b",
+                background: testModeResult.ok ? "#dcfce7" : "#fee2e2",
+                border: testModeResult.ok ? "1px solid #86efac" : "1px solid #fecaca",
+                fontWeight: 700,
+              }}
+            >
+              {testModeResult.message}
+            </div>
+          )}
+
+          <div>
+            <button
+              type="submit"
+              disabled={testModeFetcher.state !== "idle"}
+              style={{
+                ...styles.primaryButton,
+                border: "none",
+                cursor: testModeFetcher.state === "idle" ? "pointer" : "not-allowed",
+                opacity: testModeFetcher.state === "idle" ? 1 : 0.7,
+              }}
+            >
+              {testModeFetcher.state === "idle" ? "Save Test Mode" : "Saving..."}
+            </button>
+          </div>
+        </testModeFetcher.Form>
       </section>
 
       <section style={styles.statusBox}>
@@ -2430,131 +2526,36 @@ export default function ConfigurationPage() {
             <label style={styles.label}>
               Meta Test Event Code
               <input
-                style={
-                  metaTestEventCodeConfigured
-                    ? {
-                        ...styles.input,
-                        borderColor:
-                          "#22c55e",
-                        background:
-                          "#f0fdf4",
-                      }
-                    : styles.input
-                }
-                type="password"
-                value={
-                  metaTestEventCode
-                }
-                disabled={
-                  metaClearTestEventCode
-                }
-                placeholder={
-                  metaTestEventCodeConfigured
-                    ? "************************"
-                    : "Optional test event code from Meta Events Manager"
-                }
+                style={styles.input}
+                value={metaTestEventCode}
+                placeholder="Optional test event code from Meta Events Manager"
                 onChange={(event) => {
-                  const nextCode =
-                    event.currentTarget
-                      .value;
+                  const nextCode = event.currentTarget.value;
 
-                  setSelectedAssets(
-                    (previous) => ({
-                      ...previous,
-                      [
-                        "meta:Meta Test Event Code"
-                      ]: nextCode,
-                    }),
-                  );
+                  setSelectedAssets((previous) => ({
+                    ...previous,
+                    ["meta:Meta Test Event Code"]: nextCode,
+                  }));
                 }}
               />
-
-              <small
-                style={{
-                  color:
-                    metaTestEventCodeConfigured
-                      ? "#166534"
-                      : "#6b7280",
-                  fontWeight: 700,
-                }}
-              >
-                {metaTestEventCodeConfigured
-                  ? "Test code saved. CAPI events will be sent to Meta Test Events."
-                  : "The test code applies only to server-side CAPI events."}
+              <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                {selectedAssets["meta:Meta Test Event Code"] === "__configured__" ? "Test code configured. Enter a new value only to replace it." : "Use this only for testing CAPI events in Meta Events Manager later."}
               </small>
             </label>
-
-            {metaTestEventCodeConfigured && (
-              <label
-                style={
-                  styles.checkboxLabel
-                }
-              >
-                <input
-                  type="checkbox"
-                  checked={
-                    metaClearTestEventCode
-                  }
-                  onChange={(event) =>
-                    setMetaClearTestEventCode(
-                      event.currentTarget
-                        .checked,
-                    )
-                  }
-                />
-
-                Remove saved Meta test
-                event code when saving
-              </label>
-            )}
 
             <label style={styles.label}>
               Meta CAPI Access Token
               <input
-                style={
-                  metaCapiAccessTokenSaved
-                    ? {
-                        ...styles.input,
-                        borderColor:
-                          "#22c55e",
-                        background:
-                          "#f0fdf4",
-                      }
-                    : styles.input
-                }
+                style={styles.input}
                 type="password"
-                value={
-                  metaCapiAccessTokenInput
-                }
-                placeholder={
-                  metaCapiAccessTokenSaved
-                    ? "************************"
-                    : "Paste Meta CAPI access token"
-                }
+                value={metaCapiAccessTokenInput}
+                placeholder={metaCapiAccessTokenSaved ? "Token saved. Leave blank to keep current token." : "Paste Meta CAPI access token"}
                 onChange={(event) => {
-                  setMetaCapiAccessTokenInput(
-                    event.currentTarget
-                      .value,
-                  );
+                  setMetaCapiAccessTokenInput(event.currentTarget.value);
                 }}
               />
-
-              <small
-                style={{
-                  color:
-                    metaCapiAccessTokenSaved
-                      ? "#166534"
-                      : metaServerSideEnabled
-                        ? "#b45309"
-                        : "#6b7280",
-                  fontWeight: 700,
-                }}
-              >
-                {metaCapiAccessTokenSaved
-                  ? "Access token saved."
-                  : metaServerSideEnabled
-                    ? "Meta CAPI access token is required."
-                    : "Add an access token before enabling server-side CAPI."}
+              <small style={{ color: metaCapiAccessTokenSaved ? "#166534" : "#b45309", fontWeight: 700 }}>
+                {metaCapiAccessTokenLabel}. Server-side CAPI will not work without a valid access token.
               </small>
             </label>
 
@@ -2684,15 +2685,8 @@ export default function ConfigurationPage() {
                       selectedEvents: metaSelectedEvents.length ? metaSelectedEvents.join(",") : "none",
                       clientSideEnabled: metaClientSideEnabled ? "true" : "false",
                       serverSideEnabled: metaServerSideEnabled ? "true" : "false",
-                      testEventCode:
-                        metaTestEventCode ||
-                        "",
-                      clearTestEventCode:
-                        metaClearTestEventCode
-                          ? "true"
-                          : "false",
-                      contentIdFormat:
-                        metaContentIdFormat,
+                      testEventCode: metaTestEventCode || "",
+                      contentIdFormat: metaContentIdFormat,
                       capiAccessToken: metaCapiAccessTokenInput,
                     },
                     { method: "post" }
@@ -2707,54 +2701,14 @@ export default function ConfigurationPage() {
                     "Meta Dataset / Pixel"
                   );
 
-                  if (
-                    metaClearTestEventCode
-                  ) {
-                    setSelectedAssets(
-                      (previous) => ({
-                        ...previous,
-                        [
-                          "meta:Meta Test Event Code"
-                        ]: "none",
-                      }),
-                    );
+                  if (metaCapiAccessTokenInput.trim()) {
+                    setSelectedAssets((previous) => ({
+                      ...previous,
+                      ["meta:Meta CAPI Access Token"]: "__saved__",
+                    }));
 
-                    setMetaClearTestEventCode(
-                      false,
-                    );
-                  } else if (
-                    metaTestEventCode.trim()
-                  ) {
-                    setSelectedAssets(
-                      (previous) => ({
-                        ...previous,
-                        [
-                          "meta:Meta Test Event Code"
-                        ]: "__configured__",
-                      }),
-                    );
-                  }
-
-                  if (
-                    metaCapiAccessTokenInput
-                      .trim()
-                  ) {
-                    setSelectedAssets(
-                      (previous) => ({
-                        ...previous,
-                        [
-                          "meta:Meta CAPI Access Token"
-                        ]: "__saved__",
-                      }),
-                    );
-
-                    setMetaCapiAccessTokenInput(
-                      "",
-                    );
-
-                    setMetaCapiAccessTokenSavedOverride(
-                      true,
-                    );
+                    setMetaCapiAccessTokenInput("");
+                    setMetaCapiAccessTokenSavedOverride(true);
                   }
 
                   setActiveModal(null);
@@ -3003,76 +2957,14 @@ export default function ConfigurationPage() {
                 style={styles.select}
                 name="deliveryMode"
                 value={ga4DeliveryMode}
-                onChange={(event) =>
-                  setGa4DeliveryMode(
-                    event.target.value,
-                  )
-                }
+                onChange={(event) => setGa4DeliveryMode(event.target.value)}
               >
-                <option value="">
-                  Select delivery method
-                </option>
-
-                <option value="client">
-                  Client-side only
-                </option>
-
-                <option value="server">
-                  Server-side only
-                </option>
+                <option value="client">Client-side only</option>
+                <option value="server">Server-side only</option>
               </select>
-
-              <small
-                style={{
-                  color: "#6b7280",
-                  fontWeight: 500,
-                }}
-              >
-                The selected method controls where GA4 events are delivered.
-              </small>
             </label>
 
-            <label
-              style={
-                styles.checkboxLabel
-              }
-            >
-              <input
-                type="checkbox"
-                name="debugMode"
-                value="true"
-                defaultChecked={
-                  ga4DeliverySettings
-                    ?.setting
-                    ?.testCode ===
-                  "debug_view"
-                }
-                disabled={
-                  !ga4DeliveryMode
-                }
-              />
-
-              Enable GA4 DebugView testing
-            </label>
-
-            <small
-              style={{
-                color: "#6b7280",
-                fontWeight: 500,
-                lineHeight: 1.5,
-              }}
-            >
-              {ga4DeliveryMode ===
-              "server"
-                ? "Server-side GA4 events will include debug_mode and appear in DebugView."
-                : ga4DeliveryMode ===
-                    "client"
-                  ? "Client-side GA4 events will include debug_mode and appear in DebugView."
-                  : "Select a delivery method before enabling DebugView testing."}
-            </small>
-
-            {ga4DeliveryMode ===
-              "server" && (
+            {ga4DeliveryMode === "server" && (
               <label style={styles.label}>
                 <span
                   style={{
@@ -3083,39 +2975,15 @@ export default function ConfigurationPage() {
                   {ga4ApiSecretConfigured ? " · Saved" : ""}
                 </span>
                 <input
-                  style={
-                    ga4ApiSecretConfigured
-                      ? {
-                          ...styles.input,
-                          borderColor:
-                            "#22c55e",
-                          background:
-                            "#f0fdf4",
-                        }
-                      : styles.input
-                  }
+                  style={styles.input}
                   name="apiSecret"
                   type="password"
                   placeholder={
                     ga4ApiSecretConfigured
-                      ? "************************"
+                      ? "Already saved. Leave blank to keep existing secret."
                       : "Paste GA4 Measurement Protocol API Secret"
                   }
                 />
-
-                <small
-                  style={{
-                    color:
-                      ga4ApiSecretConfigured
-                        ? "#166534"
-                        : "#6b7280",
-                    fontWeight: 700,
-                  }}
-                >
-                  {ga4ApiSecretConfigured
-                    ? "API Secret saved."
-                    : "Required only for server-side GA4 delivery."}
-                </small>
               </label>
             )}
 
@@ -3206,12 +3074,7 @@ export default function ConfigurationPage() {
               <button
                 type="submit"
                 style={ga4PropertyValue ? styles.primaryButton : styles.disabledButton}
-                disabled={
-                  !ga4PropertyValue ||
-                  !ga4DeliveryMode ||
-                  ga4DeliveryFetcher.state !==
-                    "idle"
-                }
+                disabled={!ga4PropertyValue || ga4DeliveryFetcher.state !== "idle"}
               >
                 {ga4DeliveryFetcher.state === "idle"
                   ? "Save GA4 Configuration"

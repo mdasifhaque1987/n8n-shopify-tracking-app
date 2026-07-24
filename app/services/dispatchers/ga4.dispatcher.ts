@@ -216,14 +216,8 @@ function buildGa4Params(event: NormalizedTrackingEvent, options: Ga4DispatchOpti
 
   return cleanObject({
     event_id: event.event_id,
-    debug_mode:
-      debugMode || undefined,
-
-    session_id:
-      getSessionId(event),
-
-    dh_delivery_method:
-      "server",
+    debug_mode: debugMode || undefined,
+    session_id: getSessionId(event),
 
     page_location: event.page_location || stringValue(raw.page_location),
     page_title: event.page_title || stringValue(raw.page_title),
@@ -342,27 +336,10 @@ export async function dispatchToGA4(
   try {
     const ga4Settings = await getGa4DeliverySettings(workspaceId, true);
     const setting = ga4Settings.setting;
-    const credential =
-      ga4Settings.credential;
-
-    const debugModeEnabled =
-      setting?.testCode ===
-      "debug_view";
-
-    options = {
-      ...options,
-      testMode:
-        debugModeEnabled,
-      debugMode:
-        debugModeEnabled,
-    };
+    const credential = ga4Settings.credential;
 
     const serverSideEnabled =
-      setting?.deliveryMode ===
-        "server" &&
-      setting
-        ?.serverSideEnabled ===
-        true;
+      Boolean(setting?.serverSideEnabled) || setting?.deliveryMode === "server";
 
     if (!setting?.isActive || !serverSideEnabled) {
       return {
@@ -418,36 +395,13 @@ export async function dispatchToGA4(
 
     const body = buildGa4Body(event, options);
 
-    const shouldValidate =
-      Boolean(
-        options.validationOnly ||
-        options.testMode
-      );
+    const validationResult = options.validationOnly
+      ? await postGa4WithTimeout(debugEndpoint.toString(), body)
+      : null;
 
-    const validationBody =
-      shouldValidate
-        ? {
-            ...body,
-            validation_behavior:
-              "ENFORCE_RECOMMENDATIONS",
-          }
-        : body;
-
-    const validationResult =
-      shouldValidate
-        ? await postGa4WithTimeout(
-            debugEndpoint.toString(),
-            validationBody,
-          )
-        : null;
-
-    const collectResult =
-      options.validationOnly
-        ? null
-        : await postGa4WithTimeout(
-            collectEndpoint.toString(),
-            body,
-          );
+    const collectResult = options.validationOnly
+      ? null
+      : await postGa4WithTimeout(collectEndpoint.toString(), body);
 
     const safePayload = {
       ...(collectResult?.payload || {}),
@@ -470,22 +424,9 @@ export async function dispatchToGA4(
               const row = item as { name?: unknown; params?: Record<string, unknown> };
               return {
                 name: row.name,
-                debug_mode:
-                  row.params?.debug_mode,
-
-                session_id:
-                  row.params?.session_id,
-
-                engagement_time_msec:
-                  row.params
-                    ?.engagement_time_msec,
-
-                dh_delivery_method:
-                  row.params
-                    ?.dh_delivery_method,
-
-                transaction_id:
-                  row.params?.transaction_id,
+                debug_mode: row.params?.debug_mode,
+                session_id: row.params?.session_id,
+                transaction_id: row.params?.transaction_id,
                 value: row.params?.value,
                 currency: row.params?.currency,
                 items_count: Array.isArray(row.params?.items) ? row.params.items.length : 0,
@@ -494,41 +435,6 @@ export async function dispatchToGA4(
           : [],
       },
     };
-
-    if (options.testMode) {
-      const testValidationMessages =
-        Array.isArray(
-          validationResult
-            ?.payload
-            ?.validationMessages,
-        )
-          ? validationResult
-              ?.payload
-              ?.validationMessages
-          : [];
-
-      console.info(
-        "[ga4-test-delivery]",
-        JSON.stringify({
-          measurementId,
-          eventName:
-            event.event_name,
-          eventId:
-            event.event_id,
-          collectStatus:
-            collectResult?.status ||
-            null,
-          validationStatus:
-            validationResult?.status ||
-            null,
-          validationMessages:
-            testValidationMessages,
-          clientIdPresent:
-            Boolean(body.client_id),
-          testMode: true,
-        }),
-      );
-    }
 
     if (options.validationOnly) {
       const messages = validationResult?.payload?.validationMessages;
@@ -557,20 +463,9 @@ export async function dispatchToGA4(
     return {
       success: true,
       status: "success",
-      message:
-        options.testMode
-          ? Array.isArray(
-              validationResult
-                ?.payload
-                ?.validationMessages,
-            ) &&
-            validationResult
-              .payload
-              .validationMessages
-              .length > 0
-            ? "GA4 event sent with debug_mode; validation returned messages."
-            : "GA4 event sent with debug_mode and passed structural validation."
-          : "GA4 event sent successfully.",
+      message: options.testMode
+        ? "GA4 event sent with debug_mode enabled."
+        : "GA4 event sent successfully.",
       responsePayload: safePayload,
     };
   } catch (error) {

@@ -14,7 +14,7 @@ const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const DH_ITEM_METADATA_STORAGE_KEY = "dh_item_metadata_v1";
 const DH_ITEM_METADATA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DH_ITEM_METADATA_MAX_ENTRIES = 200;
-const DH_PIXEL_VERSION = "2026-07-24-ga4-items-meta-test-v9";
+const DH_PIXEL_VERSION = "2026-07-23-checkout-item-metadata-v7";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
@@ -42,107 +42,34 @@ function parseSettingJson(value, fallback) {
 
 function configFromPixelSettings(settings) {
   if (!settings) return null;
-
-  const clientEvents =
-    parseSettingJson(
-      settings.client_event_settings,
-      {}
-    );
-
-  const ga4DebugEnabled =
-    settings.ga4_debug_enabled ===
-    "true";
-
+  const clientEvents = parseSettingJson(settings.client_event_settings, {});
+  const testMode = parseSettingJson(settings.test_mode_settings, { enabled: false, channels: {} });
+  const ga4Test = testMode.channels && testMode.channels.ga4_client;
   return {
-    testMode: false,
-
+    testMode: Boolean(testMode.enabled),
     ga4: {
-      enabled:
-        settings.ga4_enabled ===
-        "true",
-
-      clientSideEnabled:
-        settings.ga4_enabled ===
-        "true",
-
+      enabled: settings.ga4_enabled === "true",
+      clientSideEnabled: settings.ga4_enabled === "true",
       deliveryMode: "client",
-
-      measurementId:
-        settings
-          .ga4_measurement_id ||
-        null,
-
-      debugMode:
-        ga4DebugEnabled,
-
-      itemIdFormat:
-        settings
-          .ga4_item_id_format ||
-        "shopify_country_product_variant",
+      measurementId: settings.ga4_measurement_id || null,
+      testMode: Boolean(ga4Test && ga4Test.enabled),
     },
-
     meta: {
-      enabled:
-        settings.meta_enabled ===
-        "true",
-
-      clientSideEnabled:
-        settings.meta_enabled ===
-        "true",
-
-      pixelId:
-        settings.meta_pixel_id ||
-        null,
-
-      datasetId:
-        settings.meta_pixel_id ||
-        null,
-
-      selectedEvents:
-        Array.isArray(
-          clientEvents.metaEvents
-        )
-          ? clientEvents.metaEvents
-          : [],
-
-      testMode: false,
+      enabled: settings.meta_enabled === "true",
+      clientSideEnabled: settings.meta_enabled === "true",
+      pixelId: settings.meta_pixel_id || null,
+      datasetId: settings.meta_pixel_id || null,
+      selectedEvents: Array.isArray(clientEvents.metaEvents) ? clientEvents.metaEvents : [],
+      testMode: Boolean(testMode.channels && testMode.channels.meta_pixel && testMode.channels.meta_pixel.enabled),
     },
-
     googleAds: {
-      enabled:
-        Array.isArray(
-          clientEvents
-            .googleAdsConversions
-        ) &&
-        clientEvents
-          .googleAdsConversions
-          .length > 0,
-
-      conversions:
-        (
-          clientEvents
-            .googleAdsConversions ||
-          []
-        ).reduce(
-          function (
-            result,
-            conversion
-          ) {
-            var key =
-              conversion.eventName;
-
-            if (!result[key]) {
-              result[key] = [];
-            }
-
-            result[key].push(
-              conversion
-            );
-
-            return result;
-          },
-          {}
-        ),
+      enabled: Array.isArray(clientEvents.googleAdsConversions) && clientEvents.googleAdsConversions.length > 0,
+      conversions: (clientEvents.googleAdsConversions || []).reduce(function (result, conversion) {
+        var key = conversion.eventName;
+        if (!result[key]) result[key] = [];
+        result[key].push(conversion);
+        return result;
+      }, {}),
     },
   };
 }
@@ -1795,137 +1722,7 @@ function addParam(params, key, value) {
   }
 }
 
-function cleanGa4ItemValue(value) {
-  if (
-    value === undefined ||
-    value === null ||
-    value === ""
-  ) {
-    return "";
-  }
-
-  return String(value)
-    .replace(/~/g, " ")
-    .trim();
-}
-
-function buildGa4ItemParameter(
-  item,
-  itemIdFormat
-) {
-  const parts = [];
-
-  function addItemPart(
-    code,
-    value
-  ) {
-    const cleanValue =
-      cleanGa4ItemValue(value);
-
-    if (cleanValue) {
-      parts.push(
-        code + cleanValue
-      );
-    }
-  }
-
-  const formattedItemId =
-    buildRemarketingProductId(
-      item,
-      itemIdFormat ||
-        "shopify_country_product_variant"
-    );
-
-  addItemPart(
-    "id",
-    formattedItemId ||
-      item.item_id ||
-      item.id
-  );
-
-  addItemPart(
-    "nm",
-    item.item_name
-  );
-
-  addItemPart(
-    "br",
-    item.item_brand
-  );
-
-  addItemPart(
-    "ca",
-    item.item_category
-  );
-
-  addItemPart(
-    "c2",
-    item.item_category2
-  );
-
-  addItemPart(
-    "c3",
-    item.item_category3
-  );
-
-  addItemPart(
-    "c4",
-    item.item_category4
-  );
-
-  addItemPart(
-    "c5",
-    item.item_category5
-  );
-
-  addItemPart(
-    "va",
-    item.item_variant
-  );
-
-  addItemPart(
-    "pr",
-    item.price
-  );
-
-  addItemPart(
-    "qt",
-    item.quantity
-  );
-
-  addItemPart(
-    "ds",
-    item.discount
-  );
-
-  addItemPart(
-    "cp",
-    item.coupon
-  );
-
-  addItemPart(
-    "li",
-    item.item_list_id
-  );
-
-  addItemPart(
-    "ln",
-    item.item_list_name
-  );
-
-  addItemPart(
-    "lp",
-    item.index
-  );
-
-  return parts.join("~");
-}
-
-function buildGa4Url(
-  payload,
-  measurementId,
-  itemIdFormat
-) {
+function buildGa4Url(payload, measurementId) {
   const params = new URLSearchParams();
 
   params.set("v", "2");
@@ -1950,24 +1747,9 @@ function buildGa4Url(
   addParam(params, "ep.original_event", payload.original_event);
 
   if (payload.ga4_debug_mode === true) {
-    addParam(
-      params,
-      "ep.debug_mode",
-      "true"
-    );
-
-    addParam(
-      params,
-      "_dbg",
-      "1"
-    );
+    addParam(params, "ep.debug_mode", "true");
+    addParam(params, "_dbg", "1");
   }
-
-  addParam(
-    params,
-    "ep.dh_delivery_method",
-    "client"
-  );
 
   if (payload.currency) {
     addParam(params, "cu", payload.currency);
@@ -1979,77 +1761,22 @@ function buildGa4Url(
   }
 
   if (payload.transaction_id) {
-    addParam(
-      params,
-      "ep.transaction_id",
-      payload.transaction_id
-    );
-
-    addParam(
-      params,
-      "ti",
-      payload.transaction_id
-    );
+    addParam(params, "ep.transaction_id", payload.transaction_id);
+    addParam(params, "ti", payload.transaction_id);
   }
 
-  const ecommerce =
-    payload.ecommerce || {};
-
-  if (
-    ecommerce.tax !==
-      undefined &&
-    ecommerce.tax !== null
-  ) {
-    addParam(
-      params,
-      "epn.tax",
-      ecommerce.tax
-    );
-  }
-
-  if (
-    ecommerce.shipping !==
-      undefined &&
-    ecommerce.shipping !== null
-  ) {
-    addParam(
-      params,
-      "epn.shipping",
-      ecommerce.shipping
-    );
-  }
-
-  if (ecommerce.coupon) {
-    addParam(
-      params,
-      "ep.coupon",
-      ecommerce.coupon
-    );
-  }
-
-  if (
-    payload.items &&
-    payload.items.length
-  ) {
-    payload.items
-      .slice(0, 10)
-      .forEach(
-        (item, index) => {
-          const itemParameter =
-            buildGa4ItemParameter(
-              item,
-              itemIdFormat
-            );
-
-          if (itemParameter) {
-            addParam(
-              params,
-              `pr${index + 1}`,
-              itemParameter
-            );
-          }
-        }
-      );
+  if (payload.items && payload.items.length) {
+    payload.items.slice(0, 10).forEach((item, index) => {
+      const n = index + 1;
+      addParam(params, `pr${n}id`, item.item_id || item.id);
+      addParam(params, `pr${n}nm`, item.item_name);
+      addParam(params, `pr${n}br`, item.item_brand);
+      addParam(params, `pr${n}ca`, item.item_category);
+      addParam(params, `pr${n}va`, item.item_variant);
+      addParam(params, `pr${n}pr`, item.price);
+      addParam(params, `pr${n}qt`, item.quantity);
+      addParam(params, `pr${n}ds`, item.discount);
+    });
   }
 
   return `${GA4_COLLECT_URL}?${params.toString()}`;
@@ -2445,17 +2172,8 @@ function sendToGa4(payload, config) {
     }
 
     const url = buildGa4Url(
-      {
-        ...payload,
-
-        ga4_debug_mode:
-          config?.ga4?.debugMode ===
-          true,
-
-      },
-      measurementId,
-      config?.ga4?.itemIdFormat ||
-        "shopify_country_product_variant"
+      { ...payload, ga4_debug_mode: config?.ga4?.testMode === true },
+      measurementId
     );
 
     fetch(url, {
