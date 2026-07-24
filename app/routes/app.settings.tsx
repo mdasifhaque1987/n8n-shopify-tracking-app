@@ -969,6 +969,10 @@ const metaEventOptions = [
   },
   { value: "Search", label: "Search" },
   { value: "AddToCart", label: "AddToCart" },
+  {
+    value: "RemoveFromCart",
+    label: "RemoveFromCart - custom event",
+  },
   { value: "InitiateCheckout", label: "InitiateCheckout" },
   { value: "AddPaymentInfo", label: "AddPaymentInfo" },
   { value: "AddShippingInfo", label: "AddShippingInfo - custom event" },

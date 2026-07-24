@@ -44,10 +44,36 @@ function stringOrNull(value: unknown): string | null {
 }
 
 function numberOrNow(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
-    return Number(value);
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value)
+  ) {
+    return value > 9999999999
+      ? Math.floor(value / 1000)
+      : Math.floor(value);
   }
+
+  if (
+    typeof value === "string" &&
+    value.trim()
+  ) {
+    const numericValue = Number(value);
+
+    if (Number.isFinite(numericValue)) {
+      return numericValue > 9999999999
+        ? Math.floor(numericValue / 1000)
+        : Math.floor(numericValue);
+    }
+
+    const parsedDate = Date.parse(value);
+
+    if (Number.isFinite(parsedDate)) {
+      return Math.floor(
+        parsedDate / 1000,
+      );
+    }
+  }
+
   return Math.floor(Date.now() / 1000);
 }
 
