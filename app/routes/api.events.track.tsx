@@ -4,6 +4,7 @@ import { claimEventProcessing } from "../lib/utils/deduplication.server";
 import { createEventDeliveryLog } from "../services/event-delivery-log.server";
 import { persistShopifyCheckoutCorrelation } from "../services/shopify-checkout-correlation.server";
 import { normalizeIncomingEvent } from "../services/normalize-event.server";
+import { dispatchPixelEventToServerPlatforms } from "../services/pixel-event-server-delivery.server";
 import {
   assertSubmittedShopMatches,
   EventIngestKeyError,
@@ -77,7 +78,12 @@ export async function loader({ request }: LoaderFunctionArgs) {
   }
 
   return Response.json(
-    { ok: true, route: "/api/events/track", telemetryOnly: true },
+    {
+      ok: true,
+      route: "/api/events/track",
+      telemetryOnly: false,
+      serverDeliveryEnabled: true,
+    },
     { headers: corsHeaders },
   );
 }
@@ -110,33 +116,99 @@ export async function action({ request }: ActionFunctionArgs) {
       event,
     });
 
-    const deduplicationId = `pixel:${installation.installationId}:${event.event_id}`;
-    const claimed = await claimEventProcessing(deduplicationId);
+    const telemetryDeduplicationId =
+      `pixel-telemetry:${installation.installationId}:${event.event_id}`;
 
-    if (!claimed) {
-      return Response.json(
-        { ok: true, received: true, duplicate: true },
-        { headers: corsHeaders },
+    const telemetryClaimed =
+      await claimEventProcessing(
+        telemetryDeduplicationId,
       );
+
+    const trustedEvent = {
+      ...event,
+      shop: installation.shop,
+    };
+
+    if (telemetryClaimed) {
+      try {
+        await createEventDeliveryLog({
+          workspaceId:
+            installation.workspaceId,
+          shop: installation.shop,
+          event: trustedEvent,
+          platform: "internal",
+          deliveryType:
+            "client_telemetry",
+          status: "received",
+          message:
+            "Untrusted client telemetry validated and received.",
+        });
+      } catch {
+        console.error(
+          "Client telemetry log failed",
+          {
+            eventName:
+              trustedEvent.event_name,
+            eventId:
+              trustedEvent.event_id,
+          },
+        );
+      }
     }
 
-    await createEventDeliveryLog({
-      workspaceId: installation.workspaceId,
-      shop: installation.shop,
-      event: { ...event, shop: installation.shop },
-      platform: "internal",
-      deliveryType: "client_telemetry",
-      status: "received",
-      message: "Untrusted client telemetry validated and received.",
-    });
+    const serverDelivery =
+      await dispatchPixelEventToServerPlatforms({
+        request,
+        workspaceId:
+          installation.workspaceId,
+        shop: installation.shop,
+        event: trustedEvent,
+      });
+
+    const failedServerDeliveries =
+      serverDelivery.deliveries.filter(
+        (delivery) =>
+          delivery.status === "failed",
+      );
+
+    if (failedServerDeliveries.length) {
+      return Response.json(
+        {
+          ok: false,
+          received: true,
+          duplicate:
+            !telemetryClaimed,
+          eventName:
+            event.event_name,
+          eventId:
+            event.event_id,
+          error:
+            "One or more configured server deliveries failed.",
+          serverDeliveries:
+            serverDelivery.deliveries,
+          purchaseDeferredToOrderWebhook:
+            serverDelivery
+              .purchaseDeferredToOrderWebhook,
+        },
+        {
+          status: 502,
+          headers: corsHeaders,
+        },
+      );
+    }
 
     return Response.json(
       {
         ok: true,
         received: true,
-        duplicate: false,
+        duplicate: !telemetryClaimed,
         eventName: event.event_name,
         eventId: event.event_id,
+        serverDeliveries:
+          serverDelivery.deliveries,
+        purchaseDeferredToOrderWebhook:
+          serverDelivery
+            .purchaseDeferredToOrderWebhook,
       },
       { headers: corsHeaders },
     );

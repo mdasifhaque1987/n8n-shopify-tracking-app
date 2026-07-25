@@ -2,6 +2,10 @@ import { randomUUID } from "node:crypto";
 import { Prisma, type ShopifyOrderJob, type ShopifyOrderPlatformDelivery } from "@prisma/client";
 import db from "../db.server";
 import { decryptToken } from "../lib/encryption.server";
+import {
+  createDhUniqueEventId,
+  isDhUniqueEventId,
+} from "../lib/utils/dh-event-id";
 import { dispatchPurchaseToGoogleAds } from "./dispatchers/google-ads.dispatcher";
 import { dispatchToGA4 } from "./dispatchers/ga4.dispatcher";
 import { dispatchToMeta } from "./dispatchers/meta.dispatcher";
@@ -297,6 +301,19 @@ function eventFromJob(job: ClaimedJob): NormalizedTrackingEvent {
       job.encryptedTrackingIdentity,
     );
 
+  const correlatedPurchaseEventId =
+    workerText(
+      trackingIdentity.purchaseEventId ||
+      trackingIdentity.purchase_event_id,
+    );
+
+  const purchaseEventId =
+    isDhUniqueEventId(
+      correlatedPurchaseEventId,
+    )
+      ? correlatedPurchaseEventId
+      : createDhUniqueEventId(0);
+
   const gaClientId =
     workerText(
       trackingIdentity.clientId,
@@ -329,7 +346,7 @@ function eventFromJob(job: ClaimedJob): NormalizedTrackingEvent {
     shop: job.shop,
     event_name: "purchase",
     meta_event: "Purchase",
-    event_id: `shopify_order_${job.orderId}`,
+    event_id: purchaseEventId,
     event_time: snapshot.createdAt && Number.isFinite(Date.parse(snapshot.createdAt))
       ? Math.floor(Date.parse(snapshot.createdAt) / 1000)
       : Math.floor(job.createdAt.getTime() / 1000),

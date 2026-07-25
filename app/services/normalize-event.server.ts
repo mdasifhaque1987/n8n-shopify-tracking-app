@@ -1,4 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
+import {
+  createDhUniqueEventId,
+} from "../lib/utils/dh-event-id";
+
 export type NormalizedTrackingEvent = {
   shop?: string | null;
   event_name: string;
@@ -44,10 +48,36 @@ function stringOrNull(value: unknown): string | null {
 }
 
 function numberOrNow(value: unknown): number {
-  if (typeof value === "number" && Number.isFinite(value)) return value;
-  if (typeof value === "string" && value.trim() && Number.isFinite(Number(value))) {
-    return Number(value);
+  if (
+    typeof value === "number" &&
+    Number.isFinite(value)
+  ) {
+    return value > 9999999999
+      ? Math.floor(value / 1000)
+      : Math.floor(value);
   }
+
+  if (
+    typeof value === "string" &&
+    value.trim()
+  ) {
+    const numericValue = Number(value);
+
+    if (Number.isFinite(numericValue)) {
+      return numericValue > 9999999999
+        ? Math.floor(numericValue / 1000)
+        : Math.floor(numericValue);
+    }
+
+    const parsedDate = Date.parse(value);
+
+    if (Number.isFinite(parsedDate)) {
+      return Math.floor(
+        parsedDate / 1000,
+      );
+    }
+  }
+
   return Math.floor(Date.now() / 1000);
 }
 
@@ -84,6 +114,8 @@ function buildRawTrackingObject(payload: any): Record<string, unknown> | null {
     "order_id",
     "checkout_token",
     "checkout_id",
+    "purchase_event_id",
+    "purchaseEventId",
     "items"
   ];
 
@@ -100,24 +132,19 @@ function buildRawTrackingObject(payload: any): Record<string, unknown> | null {
   return Object.keys(output).length ? output : null;
 }
 
-function safeEventId(eventName: string, payload: any): string {
+function safeEventId(
+  payload: any,
+): string {
   const fromPayload =
     stringOrNull(payload.event_id) ||
     stringOrNull(payload.eventId) ||
     stringOrNull(payload.id);
 
-  if (fromPayload) return fromPayload;
-
-  const transactionId =
-    stringOrNull(payload?.ecommerce?.transaction_id) ||
-    stringOrNull(payload?.transaction_id) ||
-    stringOrNull(payload?.order_id);
-
-  if (eventName === "purchase" && transactionId) {
-    return `purchase_${transactionId}`;
+  if (fromPayload) {
+    return fromPayload;
   }
 
-  return `${eventName}_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+  return createDhUniqueEventId(0);
 }
 
 export function normalizeIncomingEvent(payload: any): NormalizedTrackingEvent {
@@ -150,7 +177,7 @@ export function normalizeIncomingEvent(payload: any): NormalizedTrackingEvent {
 
     event_name: eventName,
     meta_event: stringOrNull(payload.meta_event) || stringOrNull(payload.metaEvent) || null,
-    event_id: safeEventId(eventName, payload),
+    event_id: safeEventId(payload),
     event_time: numberOrNow(payload.event_time || payload.eventTime),
 
     page_location:

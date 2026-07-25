@@ -14,11 +14,18 @@ const DH_GA_SESSION_TIMEOUT_MS = 30 * 60 * 1000;
 const DH_ITEM_METADATA_STORAGE_KEY = "dh_item_metadata_v1";
 const DH_ITEM_METADATA_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const DH_ITEM_METADATA_MAX_ENTRIES = 200;
-const DH_PIXEL_VERSION = "2026-07-23-checkout-item-metadata-v7";
+const DH_PURCHASE_EVENT_ID_STORAGE_PREFIX =
+  "dh_purchase_event_id_v1:";
+const DH_PIXEL_VERSION =
+  "2026-07-25-stape-style-event-id-v8";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
 let metaSemanticMemory = {};
+let dhBrowserId = null;
+let dhPageLoadId = null;
+let dhEventSequence = 0;
+let dhFallbackPurchaseEventId = null;
 
 async function getConfig(shop) {
   if (cachedConfig) return cachedConfig;
@@ -92,6 +99,133 @@ function createGaStyleClientId() {
   var second = Math.floor(Date.now() / 1000);
 
   return String(first) + "." + String(second);
+}
+
+function generateDhEventIdPart() {
+  return (
+    Date.now() +
+    Math.floor(
+      100000 +
+      Math.random() * 900000
+    )
+  );
+}
+
+function getDhBrowserId() {
+  if (!dhBrowserId) {
+    dhBrowserId =
+      generateDhEventIdPart();
+  }
+
+  return dhBrowserId;
+}
+
+function getDhPageLoadId() {
+  if (!dhPageLoadId) {
+    dhPageLoadId =
+      generateDhEventIdPart();
+  }
+
+  return dhPageLoadId;
+}
+
+function createDhUniqueEventId() {
+  dhEventSequence += 1;
+
+  return (
+    "dh_" +
+    getDhBrowserId() +
+    "_" +
+    getDhPageLoadId() +
+    String(dhEventSequence)
+  );
+}
+
+function isDhUniqueEventId(value) {
+  return (
+    typeof value === "string" &&
+    /^dh_\d+_\d+$/.test(value)
+  );
+}
+
+function getCheckoutToken(checkout) {
+  checkout = checkout || {};
+
+  var value =
+    checkout.token ||
+    checkout.checkoutToken ||
+    checkout.id;
+
+  if (
+    value === undefined ||
+    value === null
+  ) {
+    return "";
+  }
+
+  return String(value).trim();
+}
+
+function isCheckoutJourneyEvent(
+  eventName
+) {
+  return [
+    "begin_checkout",
+    "add_contact_info",
+    "add_shipping_info",
+    "add_payment_info",
+    "purchase",
+  ].indexOf(eventName) !== -1;
+}
+
+async function getOrCreatePurchaseEventId(
+  browser,
+  checkout
+) {
+  var checkoutToken =
+    getCheckoutToken(checkout);
+
+  if (checkoutToken) {
+    var storageKey =
+      DH_PURCHASE_EVENT_ID_STORAGE_PREFIX +
+      encodeURIComponent(
+        checkoutToken
+      );
+
+    var stored =
+      await storageGet(
+        browser,
+        storageKey
+      );
+
+    if (
+      isDhUniqueEventId(stored)
+    ) {
+      return stored;
+    }
+
+    var generated =
+      createDhUniqueEventId();
+
+    await storageSet(
+      browser,
+      storageKey,
+      generated
+    );
+
+    return generated;
+  }
+
+  if (
+    !isDhUniqueEventId(
+      dhFallbackPurchaseEventId
+    )
+  ) {
+    dhFallbackPurchaseEventId =
+      createDhUniqueEventId();
+  }
+
+  return dhFallbackPurchaseEventId;
 }
 
 async function storageGet(browser, key) {
@@ -1666,11 +1800,21 @@ async function buildPayload(event, config, browser) {
   const metaContentIds = metaContents.map((item) => item.id).filter(Boolean);
   const gaIdentity = await getGaIdentity(browser, event);
 
+  const purchaseEventId =
+    isCheckoutJourneyEvent(
+      mapped.ga4
+    )
+      ? await getOrCreatePurchaseEventId(
+          browser,
+          checkout
+        )
+      : undefined;
+
   const normalizedEventId =
-    mapped.ga4 === "purchase" &&
-    transactionId
-      ? `shopify_order_${transactionId}`
-      : event.id;
+    mapped.ga4 === "purchase"
+      ? purchaseEventId ||
+        createDhUniqueEventId()
+      : createDhUniqueEventId();
 
   return {
     event_id: normalizedEventId,
@@ -1710,8 +1854,13 @@ async function buildPayload(event, config, browser) {
       shopify_client_id: gaIdentity.shopifyClientId,
       pixel_version: DH_PIXEL_VERSION,
       shopify_event_id: event.id || undefined,
-      checkout_token: checkout.token || undefined,
-      checkout_id: checkout.id || undefined,
+      purchase_event_id:
+        purchaseEventId,
+      checkout_token:
+        getCheckoutToken(checkout) ||
+        undefined,
+      checkout_id:
+        checkout.id || undefined,
     },
   };
 }

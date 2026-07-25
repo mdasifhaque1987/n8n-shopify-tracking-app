@@ -4,6 +4,9 @@ import {
   decryptToken,
   encryptToken,
 } from "../lib/encryption.server";
+import {
+  isDhUniqueEventId,
+} from "../lib/utils/dh-event-id";
 import type {
   NormalizedTrackingEvent,
 } from "./normalize-event.server";
@@ -13,6 +16,7 @@ const CORRELATION_TTL_MS =
 
 const CHECKOUT_EVENTS = new Set([
   "begin_checkout",
+  "add_contact_info",
   "add_shipping_info",
   "add_payment_info",
   "purchase",
@@ -21,6 +25,7 @@ const CHECKOUT_EVENTS = new Set([
 export type ShopifyCheckoutIdentity = {
   clientId: string;
   sessionId: string | null;
+  purchaseEventId: string | null;
   capturedAt: number;
 };
 
@@ -91,11 +96,23 @@ function parseStoredIdentity(
       return null;
     }
 
+    const purchaseEventId =
+      text(
+        parsed.purchaseEventId ||
+        parsed.purchase_event_id,
+      );
+
     return {
       clientId,
       sessionId:
         text(parsed.sessionId) ||
         null,
+      purchaseEventId:
+        isDhUniqueEventId(
+          purchaseEventId
+        )
+          ? purchaseEventId
+          : null,
       capturedAt:
         Number(parsed.capturedAt) ||
         Date.now(),
@@ -126,7 +143,9 @@ export async function persistShopifyCheckoutCorrelation(
   const checkoutToken =
     normalizeCheckoutToken(
       raw.checkout_token ||
-      raw.checkoutToken,
+      raw.checkoutToken ||
+      raw.checkout_id ||
+      raw.checkoutId,
     );
 
   const clientId = text(
@@ -143,6 +162,25 @@ export async function persistShopifyCheckoutCorrelation(
     raw.ga_session_id ||
     raw.gaSessionId,
   );
+
+  const purchaseEventIdCandidate =
+    text(
+      raw.purchase_event_id ||
+      raw.purchaseEventId ||
+      (
+        input.event.event_name ===
+        "purchase"
+          ? input.event.event_id
+          : ""
+      ),
+    );
+
+  const purchaseEventId =
+    isDhUniqueEventId(
+      purchaseEventIdCandidate
+    )
+      ? purchaseEventIdCandidate
+      : null;
 
   const shop =
     normalizeShop(input.shop);
@@ -161,6 +199,7 @@ export async function persistShopifyCheckoutCorrelation(
     clientId,
     sessionId:
       sessionId || null,
+    purchaseEventId,
     capturedAt: Date.now(),
   };
 
