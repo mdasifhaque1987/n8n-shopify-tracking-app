@@ -240,3 +240,106 @@ test("correlated DH Purchase event ID is reused for every platform", async () =>
     /^dh_\d+_\d+$/,
   );
 });
+
+
+test("correlated Google click IDs are reused for server Purchase delivery", async () => {
+  const encryptedTrackingIdentity =
+    encryptToken(
+      JSON.stringify({
+        clientId:
+          "123456789.1760000000",
+        sessionId:
+          "1760000000",
+        purchaseEventId:
+          "dh_1770635635835_177063554862011",
+        gclid:
+          "test-gclid-123",
+        gbraid:
+          "test-gbraid-456",
+        wbraid:
+          "test-wbraid-789",
+        capturedAt:
+          now.getTime(),
+      }),
+    );
+
+  let received:
+    | {
+        platform: string;
+        gclid: string;
+        gbraid: string;
+        wbraid: string;
+      }
+    | null =
+    null;
+
+  const setup =
+    dependencies({
+      async claimJob() {
+        return {
+          ...job([
+            delivery(
+              "google_ads",
+            ),
+          ]),
+          encryptedTrackingIdentity,
+        };
+      },
+
+      async dispatch(
+        platform,
+        event,
+      ) {
+        received = {
+          platform,
+          gclid:
+            String(
+              event.attribution
+                ?.gclid ||
+              "",
+            ),
+          gbraid:
+            String(
+              event.attribution
+                ?.gbraid ||
+              "",
+            ),
+          wbraid:
+            String(
+              event.attribution
+                ?.wbraid ||
+              "",
+            ),
+        };
+
+        return {
+          success:
+            true,
+          status:
+            "sent",
+          message:
+            "sent",
+        };
+      },
+    });
+
+  await processNextOrderJob(
+    "worker-1",
+    setup.dependencies,
+    now,
+  );
+
+  assert.deepEqual(
+    received,
+    {
+      platform:
+        "google_ads",
+      gclid:
+        "test-gclid-123",
+      gbraid:
+        "test-gbraid-456",
+      wbraid:
+        "test-wbraid-789",
+    },
+  );
+});

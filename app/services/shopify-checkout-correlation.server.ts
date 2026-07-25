@@ -26,6 +26,9 @@ export type ShopifyCheckoutIdentity = {
   clientId: string;
   sessionId: string | null;
   purchaseEventId: string | null;
+  gclid: string | null;
+  gbraid: string | null;
+  wbraid: string | null;
   capturedAt: number;
 };
 
@@ -113,6 +116,15 @@ function parseStoredIdentity(
         )
           ? purchaseEventId
           : null,
+      gclid:
+        text(parsed.gclid).slice(0, 512) ||
+        null,
+      gbraid:
+        text(parsed.gbraid).slice(0, 512) ||
+        null,
+      wbraid:
+        text(parsed.wbraid).slice(0, 512) ||
+        null,
       capturedAt:
         Number(parsed.capturedAt) ||
         Date.now(),
@@ -182,6 +194,29 @@ export async function persistShopifyCheckoutCorrelation(
       ? purchaseEventIdCandidate
       : null;
 
+  const attribution =
+    record(
+      input.event.attribution,
+    );
+
+  const gclid =
+    text(
+      attribution.gclid,
+    ).slice(0, 512) ||
+    null;
+
+  const gbraid =
+    text(
+      attribution.gbraid,
+    ).slice(0, 512) ||
+    null;
+
+  const wbraid =
+    text(
+      attribution.wbraid,
+    ).slice(0, 512) ||
+    null;
+
   const shop =
     normalizeShop(input.shop);
 
@@ -200,6 +235,9 @@ export async function persistShopifyCheckoutCorrelation(
     sessionId:
       sessionId || null,
     purchaseEventId,
+    gclid,
+    gbraid,
+    wbraid,
     capturedAt: Date.now(),
   };
 

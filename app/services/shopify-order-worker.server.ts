@@ -324,6 +324,21 @@ function eventFromJob(job: ClaimedJob): NormalizedTrackingEvent {
       trackingIdentity.sessionId,
     );
 
+  const gclid =
+    workerText(
+      trackingIdentity.gclid,
+    );
+
+  const gbraid =
+    workerText(
+      trackingIdentity.gbraid,
+    );
+
+  const wbraid =
+    workerText(
+      trackingIdentity.wbraid,
+    );
+
   const address = customer.address && typeof customer.address === "object"
     ? customer.address as Record<string, unknown>
     : {};
@@ -353,6 +368,22 @@ function eventFromJob(job: ClaimedJob): NormalizedTrackingEvent {
     client_id:
       gaClientId || undefined,
     transaction_id: job.orderId,
+    attribution:
+      gclid ||
+      gbraid ||
+      wbraid
+        ? {
+            gclid:
+              gclid ||
+              undefined,
+            gbraid:
+              gbraid ||
+              undefined,
+            wbraid:
+              wbraid ||
+              undefined,
+          }
+        : undefined,
     raw:
       gaClientId || gaSessionId
         ? {
