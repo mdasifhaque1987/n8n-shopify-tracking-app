@@ -24,10 +24,18 @@ const rateBuckets = new Map<string, RateBucket>();
 
 const EVENT_ALIASES: Record<string, string> = {
   page_viewed: "page_view",
+  collection_viewed: "view_item_list",
   product_viewed: "view_item",
   product_added_to_cart: "add_to_cart",
+  product_removed_from_cart: "remove_from_cart",
+  cart_viewed: "view_cart",
   checkout_started: "begin_checkout",
+  checkout_contact_info_submitted: "add_contact_info",
+  checkout_address_info_submitted: "add_shipping_info",
+  checkout_shipping_info_submitted: "add_shipping_info",
+  payment_info_submitted: "add_payment_info",
   checkout_completed: "purchase",
+  search_submitted: "search",
 };
 
 const ALLOWED_EVENTS = new Set([
@@ -45,18 +53,28 @@ const ALLOWED_EVENTS = new Set([
 
   "add_to_cart",
   "product_added_to_cart",
+
+  "view_cart",
   "cart_viewed",
+
+  "remove_from_cart",
+  "product_removed_from_cart",
 
   "begin_checkout",
   "checkout_started",
+
+  "add_contact_info",
   "checkout_contact_info_submitted",
+
+  "add_shipping_info",
   "checkout_address_info_submitted",
+  "checkout_shipping_info_submitted",
+
+  "add_payment_info",
   "payment_info_submitted",
 
   "purchase",
   "checkout_completed",
-  "add_payment_info",
-  "add_shipping_info",
 ]);
 
 const SENSITIVE_KEY_PATTERN =
