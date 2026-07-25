@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ShopifyOrderJob, ShopifyOrderPlatformDelivery } from "@prisma/client";
+import { encryptToken } from "../lib/encryption.server";
 import {
   ORDER_WORKER_LEASE_MS,
   processNextOrderJob,
@@ -152,4 +153,90 @@ test("already-sent platform is never resent", async () => {
   });
   await processNextOrderJob("worker-1", setup.dependencies, now);
   assert.deepEqual(setup.dispatched, ["meta"]);
+});
+
+
+test("correlated DH Purchase event ID is reused for every platform", async () => {
+  const correlatedEventId =
+    "dh_1770635635835_177063554862011";
+
+  const dispatchedEvents: Array<{
+    platform: string;
+    eventId: string;
+  }> = [];
+
+  const encryptedTrackingIdentity =
+    encryptToken(
+      JSON.stringify({
+        clientId:
+          "123456789.1760000000",
+        sessionId:
+          "1760000000",
+        purchaseEventId:
+          correlatedEventId,
+        capturedAt:
+          now.getTime(),
+      }),
+    );
+
+  const setup = dependencies({
+    async claimJob() {
+      return {
+        ...job(),
+        encryptedTrackingIdentity,
+      };
+    },
+
+    async dispatch(
+      platform,
+      event,
+    ) {
+      dispatchedEvents.push({
+        platform,
+        eventId:
+          event.event_id,
+      });
+
+      return {
+        success: true,
+        status: "sent",
+        message: "sent",
+      };
+    },
+  });
+
+  await processNextOrderJob(
+    "worker-1",
+    setup.dependencies,
+    now,
+  );
+
+  assert.deepEqual(
+    dispatchedEvents,
+    [
+      {
+        platform:
+          "google_ads",
+        eventId:
+          correlatedEventId,
+      },
+      {
+        platform:
+          "ga4",
+        eventId:
+          correlatedEventId,
+      },
+      {
+        platform:
+          "meta",
+        eventId:
+          correlatedEventId,
+      },
+    ],
+  );
+
+  assert.match(
+    correlatedEventId,
+    /^dh_\d+_\d+$/,
+  );
 });

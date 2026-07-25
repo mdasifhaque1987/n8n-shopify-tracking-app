@@ -1,6 +1,9 @@
 import type { Prisma } from "@prisma/client";
 import db from "../db.server";
 import { encryptToken } from "../lib/encryption.server";
+import {
+  createDhUniqueEventId,
+} from "../lib/utils/dh-event-id";
 import { getShopifyCheckoutIdentity } from "./shopify-checkout-correlation.server";
 import { getTestModeSettings } from "./test-mode.server";
 
@@ -295,14 +298,18 @@ export async function persistVerifiedShopifyOrderWebhook(
         )
       : null;
 
-  const encryptedTrackingIdentity =
+  const purchaseEventId =
     checkoutIdentity
-      ? encryptToken(
-          JSON.stringify(
-            checkoutIdentity,
-          ),
-        )
-      : null;
+      ?.purchaseEventId ||
+    createDhUniqueEventId(0);
+
+  const encryptedTrackingIdentity =
+    encryptToken(
+      JSON.stringify({
+        ...(checkoutIdentity || {}),
+        purchaseEventId,
+      }),
+    );
 
   let testSnapshots: Parameters<WebhookPersistenceDependencies["persist"]>[0]["testSnapshots"] = {};
   const shopSettings = dependencies === defaultPersistence
