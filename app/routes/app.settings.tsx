@@ -1121,6 +1121,10 @@ export default function ConfigurationPage() {
   }, [unlockPlatform]);
 
   const assetSelectionFetcher = useFetcher();
+  const metaDatasetFetcher = useFetcher();
+  const metaDatasetResult = metaDatasetFetcher.data as
+    | { ok?: boolean; error?: string; message?: string }
+    | undefined;
   const metaBusinessOptions = assets.meta?.businessPortfolios || [];
   const metaBusinessKey = "meta:Meta Business Portfolio";
   const metaBusinessValue = selectedAssets[metaBusinessKey] || "";
@@ -2663,6 +2667,18 @@ export default function ConfigurationPage() {
               )}
             </div>
 
+            {metaDatasetResult?.ok && (
+              <div style={styles.successBox}>
+                {metaDatasetResult.message || "Meta Dataset / Pixel settings saved."}
+              </div>
+            )}
+
+            {metaDatasetResult?.error && (
+              <div style={styles.errorBox}>
+                {metaDatasetResult.error}
+              </div>
+            )}
+
             <div style={styles.modalActions}>
               <button
                 type="button"
@@ -2674,14 +2690,18 @@ export default function ConfigurationPage() {
 
               <button
                 type="button"
-                style={metaDatasetValue ? styles.primaryButton : styles.disabledButton}
-                disabled={!metaDatasetValue}
+                style={
+                  metaDatasetValue && metaDatasetFetcher.state === "idle"
+                    ? styles.primaryButton
+                    : styles.disabledButton
+                }
+                disabled={!metaDatasetValue || metaDatasetFetcher.state !== "idle"}
                 onClick={() => {
                   const selectedOption = metaDatasetOptions.find(
                     (option) => option.value === metaDatasetValue
                   );
 
-                  assetSelectionFetcher.submit(
+                  metaDatasetFetcher.submit(
                     {
                       _action: "save_meta_dataset_settings",
                       datasetId: metaDatasetValue,
@@ -2715,10 +2735,11 @@ export default function ConfigurationPage() {
                     setMetaCapiAccessTokenSavedOverride(true);
                   }
 
-                  setActiveModal(null);
                 }}
               >
-                Save Dataset / Pixel Settings
+                {metaDatasetFetcher.state === "idle"
+                  ? "Save Dataset / Pixel Settings"
+                  : "Saving..."}
               </button>
             </div>
           </div>
