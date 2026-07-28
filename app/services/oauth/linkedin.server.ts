@@ -62,7 +62,7 @@ export async function exchangeLinkedInCode(code: string): Promise<{
       expiresAt,
     };
   } catch (error) {
-    console.error("Error exchanging LinkedIn code:", error);
+    console.error("Error exchanging LinkedIn code:", error instanceof Error ? error.name : "UnknownError");
     throw new Error("Failed to exchange authorization code");
   }
 }
@@ -101,7 +101,7 @@ export async function getLinkedInAdAccounts(accessToken: string): Promise<
       name: account.name,
     }));
   } catch (error) {
-    console.error("Error getting LinkedIn ad accounts:", error);
+    console.error("Error getting LinkedIn ad accounts:", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }

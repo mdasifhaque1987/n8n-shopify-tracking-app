@@ -14,11 +14,17 @@ export async function dispatchToTikTok(
     // Get TikTok credentials
     const tiktokEvent = mapToTikTokFormat(event);
     
-    console.log("TikTok Events API dispatch:", tiktokEvent);
+    console.info(
+      "[TikTok Events API] Dispatch prepared",
+      {
+        eventName:
+          tiktokEvent.event,
+      },
+    );
     
     return { success: true, message: "Event sent to TikTok" };
   } catch (error) {
-    console.error("TikTok dispatch error:", error);
+    console.error("TikTok dispatch error:", error instanceof Error ? error.name : "UnknownError");
     throw error;
   }
 }

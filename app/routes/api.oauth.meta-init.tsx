@@ -34,7 +34,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
       const { session } = await authenticate.admin(request);
       shop = session.shop;
     } catch (error) {
-      console.error("Unable to resolve Shopify session for Meta OAuth:", error);
+      console.error("Unable to resolve Shopify session for Meta OAuth:", error instanceof Error ? error.name : "UnknownError");
     }
   }
 

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+
+set -Eeuo pipefail
+
+umask 077
+
+BACKUP_DIR="/var/backups/dh-conversions"
+KEY_FILE="/etc/dh-conversions/backup-passphrase"
+DB_NAME="${DH_CONVERSIONS_DB_NAME:-shopify_db}"
+RETENTION_DAYS="${DH_CONVERSIONS_BACKUP_RETENTION_DAYS:-30}"
+TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%NZ)"
+FINAL_FILE="${BACKUP_DIR}/${DB_NAME}-${TIMESTAMP}.dump.gpg"
+PART_FILE="${FINAL_FILE}.part"
+CHECKSUM_FILE="${FINAL_FILE}.sha256"
+
+export GNUPGHOME="/run/dh-conversions-backup/gnupg"
+
+cleanup() {
+  rm -f \
+    "$PART_FILE"
+}
+
+trap cleanup EXIT
+
+install \
+  -d \
+  -m 0700 \
+  -o root \
+  -g root \
+  "$BACKUP_DIR" \
+  "$GNUPGHOME"
+
+if [ ! -r "$KEY_FILE" ]; then
+  echo "Backup encryption key is missing."
+  exit 1
+fi
+
+/usr/sbin/runuser \
+  -u postgres \
+  -- \
+  /usr/bin/pg_dump \
+    --format=custom \
+    --no-owner \
+    --no-privileges \
+    "$DB_NAME" \
+  | /usr/bin/gpg \
+      --batch \
+      --yes \
+      --pinentry-mode loopback \
+      --passphrase-file "$KEY_FILE" \
+      --symmetric \
+      --cipher-algo AES256 \
+      --compress-algo none \
+      --output "$PART_FILE"
+
+test -s \
+  "$PART_FILE"
+
+/usr/bin/gpg \
+  --batch \
+  --quiet \
+  --pinentry-mode loopback \
+  --passphrase-file "$KEY_FILE" \
+  --decrypt \
+  "$PART_FILE" \
+  | /usr/bin/pg_restore \
+      --list \
+      >/dev/null
+
+mv \
+  "$PART_FILE" \
+  "$FINAL_FILE"
+
+(
+  cd "$BACKUP_DIR"
+
+  /usr/bin/sha256sum \
+    "$(basename "$FINAL_FILE")" \
+    > "$(basename "$CHECKSUM_FILE")"
+)
+
+find \
+  "$BACKUP_DIR" \
+  -maxdepth 1 \
+  -type f \
+  \( \
+    -name '*.dump.gpg' \
+    -o -name '*.dump.gpg.sha256' \
+  \) \
+  -mtime "+${RETENTION_DAYS}" \
+  -delete
+
+echo "Encrypted backup created:"
+echo "$(basename "$FINAL_FILE")"

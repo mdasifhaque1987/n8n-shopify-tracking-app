@@ -55,7 +55,7 @@ export async function exchangeTikTokCode(code: string): Promise<{
       advertiserIds: advertiser_ids || [],
     };
   } catch (error) {
-    console.error("Error exchanging TikTok code:", error);
+    console.error("Error exchanging TikTok code:", error instanceof Error ? error.name : "UnknownError");
     throw new Error("Failed to exchange authorization code");
   }
 }
@@ -95,7 +95,7 @@ export async function getTikTokAdvertisers(accessToken: string): Promise<
       name: advertiser.advertiser_name,
     }));
   } catch (error) {
-    console.error("Error getting TikTok advertisers:", error);
+    console.error("Error getting TikTok advertisers:", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }
@@ -128,7 +128,7 @@ export async function getTikTokPixels(
       name: pixel.pixel_name,
     }));
   } catch (error) {
-    console.error("Error getting TikTok pixels:", error);
+    console.error("Error getting TikTok pixels:", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }

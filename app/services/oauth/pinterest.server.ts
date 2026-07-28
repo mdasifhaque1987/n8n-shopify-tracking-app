@@ -67,7 +67,7 @@ export async function exchangePinterestCode(code: string): Promise<{
       expiresAt,
     };
   } catch (error) {
-    console.error("Error exchanging Pinterest code:", error);
+    console.error("Error exchanging Pinterest code:", error instanceof Error ? error.name : "UnknownError");
     throw new Error("Failed to exchange authorization code");
   }
 }
@@ -117,7 +117,7 @@ export async function refreshPinterestToken(
       expiresAt,
     };
   } catch (error) {
-    console.error("Error refreshing Pinterest token:", error);
+    console.error("Error refreshing Pinterest token:", error instanceof Error ? error.name : "UnknownError");
     throw new Error("Failed to refresh access token");
   }
 }
@@ -143,7 +143,7 @@ export async function getPinterestAdAccounts(accessToken: string): Promise<
       name: account.name,
     }));
   } catch (error) {
-    console.error("Error getting Pinterest ad accounts:", error);
+    console.error("Error getting Pinterest ad accounts:", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }

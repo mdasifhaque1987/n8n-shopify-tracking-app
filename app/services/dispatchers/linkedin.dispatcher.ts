@@ -8,14 +8,22 @@ export async function dispatchToLinkedIn(
   event: UnifiedEvent,
   workspaceId: string
 ): Promise<{ success: boolean; message?: string }> {
+  void workspaceId;
+
   try {
     const linkedinEvent = mapToLinkedInFormat(event);
     
-    console.log("LinkedIn CAPI dispatch:", linkedinEvent);
+    console.info(
+      "[LinkedIn CAPI] Dispatch prepared",
+      {
+        eventName:
+          linkedinEvent.conversion,
+      },
+    );
     
     return { success: true, message: "Event sent to LinkedIn" };
   } catch (error) {
-    console.error("LinkedIn dispatch error:", error);
+    console.error("LinkedIn dispatch error:", error instanceof Error ? error.name : "UnknownError");
     throw error;
   }
 }

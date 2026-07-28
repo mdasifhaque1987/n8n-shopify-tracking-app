@@ -65,7 +65,7 @@ export async function exchangeMicrosoftCode(code: string): Promise<{
       expiresAt,
     };
   } catch (error) {
-    console.error("Error exchanging Microsoft code:", error);
+    console.error("Error exchanging Microsoft code:", error instanceof Error ? error.name : "UnknownError");
     throw new Error("Failed to exchange authorization code");
   }
 }
@@ -113,7 +113,7 @@ export async function refreshMicrosoftToken(
       expiresAt,
     };
   } catch (error) {
-    console.error("Error refreshing Microsoft token:", error);
+    console.error("Error refreshing Microsoft token:", error instanceof Error ? error.name : "UnknownError");
     throw new Error("Failed to refresh access token");
   }
 }

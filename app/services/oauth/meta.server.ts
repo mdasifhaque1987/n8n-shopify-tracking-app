@@ -126,7 +126,7 @@ export async function exchangeMetaCode(code: string): Promise<{
       userName: userResponse.data.name || userResponse.data.id,
     };
   } catch (error: any) {
-    console.error("Error exchanging Meta code:", error?.response?.data || error);
+    console.error("Error exchanging Meta code:", error?.name || "UnknownError");
 
     const details =
       error?.response?.data?.error?.message ||
@@ -181,7 +181,7 @@ export async function refreshMetaToken(
       expiresAt,
     };
   } catch (error: any) {
-    console.error("Error refreshing Meta token:", error?.response?.data || error);
+    console.error("Error refreshing Meta token:", error?.name || "UnknownError");
 
     const details =
       error?.response?.data?.error?.message ||
@@ -251,7 +251,7 @@ export async function getMetaBusinessPortfolios(accessToken: string): Promise<
 
     return uniqueBusinesses;
   } catch (error: any) {
-    console.error("Error getting Meta business portfolios:", error?.response?.data || error);
+    console.error("Error getting Meta business portfolios:", error?.name || "UnknownError");
     return [];
   }
 }
@@ -318,7 +318,7 @@ export async function getMetaDatasetsForBusiness(
     } catch (error: any) {
       console.error(
         `Error loading Meta datasets from ${endpoint}:`,
-        error?.response?.data || error
+        error?.name || "UnknownError"
       );
     }
   }
@@ -359,7 +359,7 @@ export async function getMetaAdAccounts(accessToken: string): Promise<
       name: account.name,
     }));
   } catch (error: any) {
-    console.error("Error getting Meta ad accounts:", error?.response?.data || error);
+    console.error("Error getting Meta ad accounts:", error?.name || "UnknownError");
     return [];
   }
 }
@@ -389,7 +389,7 @@ export async function getMetaPages(accessToken: string): Promise<
       name: page.name,
     }));
   } catch (error: any) {
-    console.error("Error getting Meta pages:", error?.response?.data || error);
+    console.error("Error getting Meta pages:", error?.name || "UnknownError");
     return [];
   }
 }
@@ -422,7 +422,7 @@ export async function getMetaPixels(
       name: pixel.name,
     }));
   } catch (error: any) {
-    console.error("Error getting Meta pixels:", error?.response?.data || error);
+    console.error("Error getting Meta pixels:", error?.name || "UnknownError");
     return [];
   }
 }

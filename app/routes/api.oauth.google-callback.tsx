@@ -13,7 +13,7 @@ function decodeStatePayload(state: string): {
     const decoded = Buffer.from(state, "base64url").toString("utf8");
     return JSON.parse(decoded);
   } catch (error) {
-    console.error("Unable to decode OAuth state payload:", error);
+    console.error("Unable to decode OAuth state payload:", error instanceof Error ? error.name : "UnknownError");
     return {};
   }
 }
@@ -131,7 +131,9 @@ export async function loader({ request }: LoaderFunctionArgs) {
   );
 
   if (error) {
-    console.error("Google OAuth error:", error);
+    console.error(
+      "Google OAuth error received from provider.",
+    );
     return htmlPage(
       "Google connection failed",
       `Google returned error: ${error}`,

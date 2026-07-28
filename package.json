@@ -2,7 +2,7 @@
   "name": "dh-tracking-app-new",
   "private": true,
   "scripts": {
-    "build": "react-router build && npm run build:worker",
+    "build": "react-router build && npm run build:worker && npm run build:retention",
     "build:worker": "esbuild scripts/order-webhook-worker.ts --bundle --platform=node --format=esm --packages=external --outfile=build/worker/order-webhook-worker.mjs",
     "dev": "shopify app dev",
     "config:link": "shopify app config link",
@@ -19,7 +19,9 @@
     "prisma": "prisma",
     "graphql-codegen": "graphql-codegen",
     "vite": "vite",
-    "typecheck": "react-router typegen && tsc --noEmit"
+    "typecheck": "react-router typegen && tsc --noEmit",
+    "build:retention": "esbuild scripts/protected-data-retention.ts --bundle --platform=node --format=esm --packages=external --outfile=build/worker/protected-data-retention.mjs",
+    "retention:run": "node ./build/worker/protected-data-retention.mjs"
   },
   "type": "module",
   "engines": {

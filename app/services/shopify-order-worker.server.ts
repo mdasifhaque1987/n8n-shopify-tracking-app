@@ -11,6 +11,9 @@ import { dispatchToGA4 } from "./dispatchers/ga4.dispatcher";
 import { dispatchToMeta } from "./dispatchers/meta.dispatcher";
 import { getAssetSelections } from "./asset-selection.server";
 import { createEventDeliveryLog } from "./event-delivery-log.server";
+import {
+  writeProtectedDataAccessLog as recordProtectedDataAccess,
+} from "./security/protected-data-access-log.server";
 import type { NormalizedTrackingEvent } from "./normalize-event.server";
 import { verifyShopifyAppPricingSubscription } from "./shopify-app-pricing.server";
 import type { MinimizedOrderSnapshot, OrderDeliveryPlatform } from "./shopify-order-webhook.server";
@@ -434,6 +437,18 @@ export type WorkerDependencies = {
   dispatch(platform: OrderDeliveryPlatform, event: NormalizedTrackingEvent, workspaceId: string, delivery: ShopifyOrderPlatformDelivery): Promise<DispatchResult>;
   finishDelivery(delivery: ShopifyOrderPlatformDelivery, decision: DeliveryDecision, attempt: number, now: Date): Promise<void>;
   writeDeliveryLog(platform: OrderDeliveryPlatform, event: NormalizedTrackingEvent, workspaceId: string, decision: DeliveryDecision): Promise<void>;
+  recordProtectedDataAccess?(input: {
+    workspaceId: string;
+    shop: string;
+    actorType: string;
+    actorReference: string;
+    action: string;
+    resourceType: string;
+    resourceReference: string;
+    resourceCount: number;
+    outcome: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<void>;
   finishJob(jobId: string, now: Date): Promise<void>;
   retryJob(jobId: string, category: string, attempt: number, now: Date): Promise<void>;
 };
@@ -537,7 +552,15 @@ const defaultDependencies: WorkerDependencies = {
       }),
       db.shopifyOrderJob.update({
         where: { id: jobId },
-        data: { status: "blocked", lastErrorCategory: category, completedAt: new Date(), lockedAt: null, leaseOwner: null },
+        data: {
+          status: "blocked",
+          lastErrorCategory: category,
+          completedAt: new Date(),
+          lockedAt: null,
+          leaseOwner: null,
+          encryptedCustomerData: null,
+          encryptedTrackingIdentity: null,
+        },
       }),
     ]);
   },
@@ -632,6 +655,9 @@ const defaultDependencies: WorkerDependencies = {
       responsePayload: { source: "shopify_order_worker", errorCategory: decision.category },
     });
   },
+  async recordProtectedDataAccess(input) {
+    await recordProtectedDataAccess(input);
+  },
   async finishJob(jobId, now) {
     const deliveries = await db.shopifyOrderPlatformDelivery.findMany({ where: { jobId } });
     const retryable = deliveries.filter((delivery: ShopifyOrderPlatformDelivery) =>
@@ -658,6 +684,8 @@ const defaultDependencies: WorkerDependencies = {
         completedAt: now,
         lockedAt: null,
         leaseOwner: null,
+        encryptedCustomerData: null,
+        encryptedTrackingIdentity: null,
       },
     });
   },
@@ -672,6 +700,14 @@ const defaultDependencies: WorkerDependencies = {
         completedAt: exhausted ? now : null,
         lockedAt: null,
         leaseOwner: null,
+        encryptedCustomerData:
+          exhausted
+            ? null
+            : undefined,
+        encryptedTrackingIdentity:
+          exhausted
+            ? null
+            : undefined,
       },
     });
   },
@@ -700,6 +736,22 @@ export async function processNextOrderJob(
     await dependencies.retryJob(job.id, "workspace_unavailable", job.attemptCount, now);
     return true;
   }
+
+  await dependencies.recordProtectedDataAccess?.({
+    workspaceId,
+    shop: job.shop,
+    actorType: "service",
+    actorReference: workerId,
+    action: "decrypt_for_conversion_delivery",
+    resourceType: "shopify_order_job",
+    resourceReference: job.id,
+    resourceCount: 1,
+    outcome: "success",
+    metadata: {
+      deliveryCount:
+        job.deliveries.length,
+    },
+  });
 
   const configured = await dependencies.getConfiguredPlatforms(workspaceId);
   const event = eventFromJob(job);

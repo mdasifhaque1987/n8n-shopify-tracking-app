@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily DH Conversions DLP scan
+
+[Timer]
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=dh-conversions-dlp-scan.service
+
+[Install]
+WantedBy=timers.target

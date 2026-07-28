@@ -345,6 +345,27 @@ model OAuthState {
 }
 
 // Enums
+
+model ProtectedDataAccessLog {
+  id                    String   @id @default(cuid())
+  workspaceId           String?
+  shop                  String?
+  actorType             String
+  actorReferenceHash    String?
+  action                String
+  resourceType          String
+  resourceReferenceHash String?
+  resourceCount         Int      @default(1)
+  outcome               String   @default("success")
+  metadata              Json?
+  createdAt             DateTime @default(now())
+
+  @@index([workspaceId, createdAt])
+  @@index([shop, createdAt])
+  @@index([action, createdAt])
+  @@index([createdAt])
+}
+
 enum UserRole {
   ADMIN
   USER

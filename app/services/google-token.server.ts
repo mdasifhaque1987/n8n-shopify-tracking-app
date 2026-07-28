@@ -41,7 +41,7 @@ async function loadEncryptionHelpers(): Promise<EncryptionHelpers> {
 
     return { encrypt, decrypt };
   } catch (error) {
-    console.warn("[Google Token] Could not load encryption helpers", error);
+    console.warn("[Google Token] Could not load encryption helpers", error instanceof Error ? error.name : "UnknownError");
     return {};
   }
 }

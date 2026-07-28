@@ -8,14 +8,22 @@ export async function dispatchToMicrosoft(
   event: UnifiedEvent,
   workspaceId: string
 ): Promise<{ success: boolean; message?: string }> {
+  void workspaceId;
+
   try {
     const microsoftEvent = mapToMicrosoftFormat(event);
     
-    console.log("Microsoft UET dispatch:", microsoftEvent);
+    console.info(
+      "[Microsoft UET] Dispatch prepared",
+      {
+        eventName:
+          microsoftEvent.event_type,
+      },
+    );
     
     return { success: true, message: "Event sent to Microsoft Ads" };
   } catch (error) {
-    console.error("Microsoft dispatch error:", error);
+    console.error("Microsoft dispatch error:", error instanceof Error ? error.name : "UnknownError");
     throw error;
   }
 }

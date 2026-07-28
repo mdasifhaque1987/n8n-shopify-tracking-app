@@ -2,6 +2,7 @@ import { Form, Link, useLoaderData } from "react-router";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
+import { writeProtectedDataAccessLog } from "../services/security/protected-data-access-log.server";
 
 export const loader = async ({ request }) => {
   const { session } = await authenticate.admin(request);
@@ -32,6 +33,30 @@ export const loader = async ({ request }) => {
       createdAt: "desc",
     },
     take: 250,
+  });
+
+  await writeProtectedDataAccessLog({
+    workspaceId: workspace.id,
+    shop: session.shop,
+    actorType: "merchant_admin",
+    actorReference:
+      String(
+        session.id ||
+        session.userId ||
+        session.shop
+      ),
+    action: "view_delivery_logs",
+    resourceType: "event_delivery_log",
+    resourceCount: logs.length,
+    outcome: "success",
+    metadata: {
+      platformFilterApplied:
+        Boolean(platform),
+      statusFilterApplied:
+        Boolean(status),
+      eventFilterApplied:
+        Boolean(eventName),
+    },
   });
 
   return {

@@ -13,11 +13,17 @@ export async function dispatchToPinterest(
   try {
     const pinterestEvent = mapToPinterestFormat(event);
     
-    console.log("Pinterest CAPI dispatch:", pinterestEvent);
+    console.info(
+      "[Pinterest CAPI] Dispatch prepared",
+      {
+        eventName:
+          pinterestEvent.event_name,
+      },
+    );
     
     return { success: true, message: "Event sent to Pinterest" };
   } catch (error) {
-    console.error("Pinterest dispatch error:", error);
+    console.error("Pinterest dispatch error:", error instanceof Error ? error.name : "UnknownError");
     throw error;
   }
 }

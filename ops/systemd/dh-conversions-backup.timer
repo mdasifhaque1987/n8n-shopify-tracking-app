@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily DH Conversions encrypted backup
+
+[Timer]
+OnCalendar=*-*-* 02:15:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=dh-conversions-backup.service
+
+[Install]
+WantedBy=timers.target

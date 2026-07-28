@@ -1,0 +1,30 @@
+[Unit]
+Description=DH Conversions protected-data retention
+After=postgresql.service
+Requires=postgresql.service
+
+[Service]
+Type=oneshot
+User=asif-haque
+Group=asif-haque
+WorkingDirectory=/home/asif-haque/Downloads/dh-tracking-app-new
+EnvironmentFile=/home/asif-haque/Downloads/dh-tracking-app-new/.env
+Environment=NODE_ENV=production
+Environment=DELIVERY_LOG_RETENTION_DAYS=90
+Environment=ORDER_JOB_RETENTION_DAYS=90
+Environment=ACCESS_AUDIT_RETENTION_DAYS=365
+ExecStart=/usr/bin/node /home/asif-haque/Downloads/dh-tracking-app-new/build/worker/protected-data-retention.mjs
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

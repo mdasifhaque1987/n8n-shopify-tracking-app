@@ -303,7 +303,7 @@ export async function getGoogleAdsAccounts(
       throw error;
     }
 
-    console.error("Error getting Google Ads accounts:", error);
+    console.error("Error getting Google Ads accounts:", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }
@@ -368,7 +368,7 @@ export async function getMerchantCenters(
       throw error;
     }
 
-    console.error("Error getting Merchant Centers:", error);
+    console.error("Error getting Merchant Centers:", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }
@@ -461,7 +461,7 @@ export async function getGoogleAnalyticsDataStreams(
       throw error;
     }
 
-    console.warn("Failed to load GA4 data streams", error);
+    console.warn("Failed to load GA4 data streams", error instanceof Error ? error.name : "UnknownError");
     return [];
   }
 }
