@@ -15,7 +15,7 @@ Production database backups must:
 
 ## Separation
 
-Backup encryption credentials are stored separately from backup files and are readable only by the root account.
+Backup encryption credentials are stored separately from backup files, remain root-owned and are readable only by root and the dedicated PostgreSQL backup service identity.
 
 ## Failure handling
 

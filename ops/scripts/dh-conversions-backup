@@ -11,13 +11,15 @@ RETENTION_DAYS="${DH_CONVERSIONS_BACKUP_RETENTION_DAYS:-30}"
 TIMESTAMP="$(date -u +%Y%m%dT%H%M%S%NZ)"
 FINAL_FILE="${BACKUP_DIR}/${DB_NAME}-${TIMESTAMP}.dump.gpg"
 PART_FILE="${FINAL_FILE}.part"
-CHECKSUM_FILE="${FINAL_FILE}.sha256"
-
 export GNUPGHOME="/run/dh-conversions-backup/gnupg"
+CHECKSUM_FILE="${FINAL_FILE}.sha256"
+VERIFY_FILE="${GNUPGHOME}/verify-${TIMESTAMP}.dump"
+
 
 cleanup() {
   rm -f \
-    "$PART_FILE"
+    "$PART_FILE" \
+    "$VERIFY_FILE"
 }
 
 trap cleanup EXIT
@@ -25,8 +27,6 @@ trap cleanup EXIT
 install \
   -d \
   -m 0700 \
-  -o root \
-  -g root \
   "$BACKUP_DIR" \
   "$GNUPGHOME"
 
@@ -35,10 +35,7 @@ if [ ! -r "$KEY_FILE" ]; then
   exit 1
 fi
 
-/usr/sbin/runuser \
-  -u postgres \
-  -- \
-  /usr/bin/pg_dump \
+/usr/bin/pg_dump \
     --format=custom \
     --no-owner \
     --no-privileges \
@@ -59,13 +56,23 @@ test -s \
 /usr/bin/gpg \
   --batch \
   --quiet \
+  --yes \
   --pinentry-mode loopback \
   --passphrase-file "$KEY_FILE" \
+  --output "$VERIFY_FILE" \
   --decrypt \
-  "$PART_FILE" \
-  | /usr/bin/pg_restore \
-      --list \
-      >/dev/null
+  "$PART_FILE"
+
+test -s \
+  "$VERIFY_FILE"
+
+/usr/bin/pg_restore \
+  --list \
+  "$VERIFY_FILE" \
+  >/dev/null
+
+rm -f \
+  "$VERIFY_FILE"
 
 mv \
   "$PART_FILE" \
