@@ -3,13 +3,14 @@ import {
   resolveGoogleAccessToken,
   withGoogleAccessTokenRetry,
 } from "../services/google-token.server";
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useState, useRef, type CSSProperties, type ReactNode } from "react";
 import {
   Link,
   useFetcher,
   useLoaderData,
   useLocation,
   useNavigate,
+  useRevalidator,
   type ActionFunctionArgs,
   type LoaderFunctionArgs,
 } from "react-router";
@@ -27,6 +28,10 @@ import {
   deleteAssetSelection,
   saveAssetSelection,
 } from "../services/asset-selection.server";
+import {
+  getGoogleAssetDiscoveryCache,
+  saveGoogleAssetDiscoveryCache,
+} from "../services/google-asset-cache.server";
 import { getOrCreateShopWorkspace } from "../services/workspace.server";
 import { authenticate } from "../shopify.server";
 import {
@@ -39,6 +44,7 @@ import {
   getGoogleAnalyticsDataStreams,
   getGoogleAdsAccounts,
   getMerchantCenters,
+  GoogleAdsDiscoveryError,
 } from "../services/oauth/google.server";
 import {
   formatGa4PropertyLabel,
@@ -66,7 +72,10 @@ import {
   getEventIngestPixelStatus,
   synchronizeWebPixelSettings,
 } from "../services/shopify-web-pixel.server";
-import { encryptToken } from "../lib/encryption.server";
+import {
+  decryptToken,
+  encryptToken,
+} from "../lib/encryption.server";
 async function withTimeout<T>(
   promise: Promise<T>,
   fallback: T,
@@ -92,7 +101,114 @@ async function withTimeout<T>(
 type AssetOption = {
   value: string;
   label: string;
+  loginCustomerId?: string;
+  manager?: boolean;
+  status?: string;
 };
+
+function readStoredMetaSecret(
+  value: string | null | undefined
+) {
+  const stored =
+    String(
+      value || ""
+    ).trim();
+
+  if (
+    !stored ||
+    stored === "none"
+  ) {
+    return "";
+  }
+
+  try {
+    if (
+      stored.startsWith(
+        "enc:v1:"
+      )
+    ) {
+      return String(
+        decryptToken(
+          stored.slice(7)
+        ) || ""
+      ).trim();
+    }
+
+    /*
+     * Backward compatibility for older
+     * unencrypted values, if any exist.
+     */
+    return stored;
+  } catch (error) {
+    console.warn(
+      "[Meta Settings] Stored secret could not be decrypted",
+      {
+        errorName:
+          error instanceof Error
+            ? error.name
+            : "UnknownError",
+      }
+    );
+
+    return "";
+  }
+}
+
+
+function maskMetaCapiToken(
+  value: string | null | undefined
+) {
+  const token =
+    String(
+      value || ""
+    ).trim();
+
+  if (!token) {
+    return "";
+  }
+
+  /*
+   * Normal Meta access tokens are much longer
+   * than twelve characters.
+   *
+   * Never reveal a short secret completely.
+   */
+  if (token.length <= 12) {
+    const visible =
+      Math.min(
+        3,
+        Math.max(
+          1,
+          Math.floor(
+            token.length / 4
+          )
+        )
+      );
+
+    return (
+      token.slice(
+        0,
+        visible
+      ) +
+      "************" +
+      token.slice(
+        -visible
+      )
+    );
+  }
+
+  return (
+    token.slice(
+      0,
+      6
+    ) +
+    "************" +
+    token.slice(
+      -6
+    )
+  );
+}
+
 
 export async function loader({ request }: LoaderFunctionArgs) {
   const { session, admin } = await authenticate.admin(request);
@@ -102,12 +218,24 @@ export async function loader({ request }: LoaderFunctionArgs) {
   const savedAssetSelectionLabels = await getAssetSelectionLabels(workspace.id);
   const ga4DeliverySettings = await getGa4DeliverySettings(workspace.id);
   const testModeSettings = await getTestModeSettings(workspace.id);
-  const webPixelStatus = await getEventIngestPixelStatus(
-    session.shop,
-    admin,
+  const webPixelStatus = await withTimeout(
+    getEventIngestPixelStatus(
+      session.shop,
+      admin,
+    ),
+    {
+      pixelExists: false,
+      ingestKeyConfigured: false,
+      storedPixelId: null,
+      statusError:
+        "Shopify web pixel status could not be verified.",
+      lastSyncError: null,
+    },
+    8000,
   );
   const savedGa4PropertyId = savedAssetSelections["google:GA4 Property"] || "";
   let ga4AssetMessage = "";
+  let googleAdsAssetMessage = "";
   const url = new URL(request.url);
   const redirectedPlanHandle =
     url.searchParams.get("plan_handle");
@@ -139,9 +267,13 @@ export async function loader({ request }: LoaderFunctionArgs) {
   if (host) navParams.set("host", host);
   if (embedded) navParams.set("embedded", embedded);
   if (locale) navParams.set("locale", locale);
+  const shouldLoadGoogleAssets =
+    url.searchParams.get("loadGoogleAssets") === "true";
+
   const shouldLoadGa4Assets =
     url.searchParams.get("loadGa4Assets") === "true" ||
-    url.searchParams.get("loadGoogleAssets") === "true";
+    shouldLoadGoogleAssets;
+
   const shouldLoadMetaAssets =
     url.searchParams.get("loadMetaAssets") === "true";
   const requestedUnlockPlatform =
@@ -193,37 +325,259 @@ export async function loader({ request }: LoaderFunctionArgs) {
   );
 
 
+  /*
+   * Load the last successful Google discovery first.
+   *
+   * Normal React Router loader requests intentionally do
+   * not call the external Google APIs. They must therefore
+   * start with this persisted list instead of [].
+   */
+  if (googleConnection) {
+    const googleAssetCache =
+      await getGoogleAssetDiscoveryCache(
+        workspace.id,
+        String(
+          googleConnection.accountId || ""
+        )
+      );
+
+    assets.google.ga4Properties =
+      googleAssetCache.ga4Properties;
+
+    assets.google.googleAdsAccounts =
+      googleAssetCache.googleAdsAccounts;
+
+    assets.google.merchantCenters =
+      googleAssetCache.merchantCenters;
+  }
+
+
   if (googleConnection) {
     const decryptedGoogleConnection = await getPlatformConnection(googleConnection.id);
 
     if (decryptedGoogleConnection?.decryptedAccessToken) {
-      const googleAdsAccounts = await withTimeout(
-        withGoogleAccessTokenRetry(
-          googleConnection,
-          (accessToken) => getGoogleAdsAccounts(accessToken)
-        ),
-        [],
-        12000
-      );
+      /*
+       * Google Ads and Merchant Center discovery can be expensive.
+       *
+       * Never run it on ordinary loader revalidation, focus events,
+       * fetcher POSTs, or routine settings-page navigation.
+       *
+       * It is performed only after an explicit Google connect /
+       * reconnect / refresh flow that supplies loadGoogleAssets=true.
+       */
+      if (shouldLoadGoogleAssets) {
+        /*
+         * GOOGLE ADS
+         *
+         * Run independently from Merchant Center.
+         * A 429 here must not prevent GMC or GA4 discovery.
+         */
+        try {
+          const googleAdsAccounts =
+            await withGoogleAccessTokenRetry(
+              googleConnection,
+              (accessToken) =>
+                getGoogleAdsAccounts(
+                  accessToken,
+                  assets.google.googleAdsAccounts
+                )
+            );
 
-      assets.google.googleAdsAccounts = googleAdsAccounts.map((account) => ({
-        value: account.customerId,
-        label: `${account.descriptiveName || "Google Ads Account"} (${account.customerId})`,
-      }));
+          const discoveredGoogleAdsAccounts =
+            googleAdsAccounts.map((account) => ({
+              value:
+                account.customerId,
+              label:
+                account.descriptiveName &&
+                account.descriptiveName !==
+                  `Google Ads Account ${account.customerId}`
+                  ? `${account.descriptiveName} (${account.customerId})`
+                  : `Google Ads Account ${account.customerId}`,
+              loginCustomerId:
+                account.loginCustomerId || "",
+              manager:
+                account.manager,
+              status:
+                account.status,
+            }));
 
-      const merchantCenters = await withTimeout(
-        withGoogleAccessTokenRetry(
-          googleConnection,
-          (accessToken) => getMerchantCenters(accessToken)
-        ),
-        [],
-        12000
-      );
+          if (
+            discoveredGoogleAdsAccounts.length > 0
+          ) {
+            assets.google.googleAdsAccounts =
+              discoveredGoogleAdsAccounts;
 
-      assets.google.merchantCenters = merchantCenters.map((account) => ({
-        value: account.merchantId,
-        label: `${account.name || "Merchant Center"} (${account.merchantId})`,
-      }));
+            await saveGoogleAssetDiscoveryCache({
+              workspaceId:
+                workspace.id,
+              googleAccountId:
+                String(
+                  googleConnection.accountId || ""
+                ),
+              kind:
+                "googleAdsAccounts",
+              options:
+                discoveredGoogleAdsAccounts,
+            });
+          }
+
+          if (
+            googleAdsAccounts.length === 0 &&
+            assets.google.googleAdsAccounts.length === 0
+          ) {
+            googleAdsAssetMessage =
+              "No Google Ads accounts are directly accessible to this Google login.";
+          }
+        } catch (error) {
+          const status =
+            error instanceof GoogleAdsDiscoveryError
+              ? error.status
+              : 0;
+
+          console.warn(
+            "[Google Ads Discovery] Failed",
+            {
+              status,
+              category:
+                error instanceof GoogleAdsDiscoveryError
+                  ? error.category
+                  : "api_error",
+            }
+          );
+
+          /*
+           * Do not clear assets here.
+           * The cached account list remains available.
+           */
+          googleAdsAssetMessage =
+            error instanceof GoogleAdsDiscoveryError
+              ? error.message
+              : "Google Ads accounts could not be refreshed. The previous account list has been preserved.";
+        }
+
+        /*
+         * MERCHANT CENTER
+         *
+         * This runs even if Google Ads discovery failed.
+         */
+        try {
+          const merchantCenters =
+            await withTimeout(
+              withGoogleAccessTokenRetry(
+                googleConnection,
+                (accessToken) =>
+                  getMerchantCenters(
+                    accessToken,
+                    assets.google.merchantCenters
+                  )
+              ),
+              [],
+              45000
+            );
+
+          /*
+           * Preserve previously learned real Merchant Center
+           * names if a later API refresh can only return IDs.
+           */
+          const cachedMerchantLabels =
+            new Map(
+              assets.google.merchantCenters.map(
+                (option) => [
+                  String(option.value || ""),
+                  String(option.label || ""),
+                ]
+              )
+            );
+
+          const discoveredMerchantCenters =
+            merchantCenters.map((account) => {
+              const merchantId =
+                String(
+                  account.merchantId || ""
+                ).trim();
+
+              const discoveredName =
+                String(
+                  account.name || ""
+                ).trim();
+
+              const genericName =
+                `Merchant Center ${merchantId}`;
+
+              const genericLabel =
+                `${genericName} (${merchantId})`;
+
+              const cachedLabel =
+                String(
+                  cachedMerchantLabels.get(
+                    merchantId
+                  ) || ""
+                ).trim();
+
+              const hasRealDiscoveredName =
+                Boolean(
+                  discoveredName &&
+                  discoveredName !==
+                    genericName
+                );
+
+              const hasRealCachedName =
+                Boolean(
+                  cachedLabel &&
+                  cachedLabel !==
+                    genericName &&
+                  cachedLabel !==
+                    genericLabel
+                );
+
+              return {
+                value:
+                  merchantId,
+
+                label:
+                  hasRealDiscoveredName
+                    ? `${discoveredName} (${merchantId})`
+                    : hasRealCachedName
+                      ? cachedLabel
+                      : genericLabel,
+              };
+            });
+
+          if (
+            discoveredMerchantCenters.length > 0
+          ) {
+            assets.google.merchantCenters =
+              discoveredMerchantCenters;
+
+            await saveGoogleAssetDiscoveryCache({
+              workspaceId:
+                workspace.id,
+              googleAccountId:
+                String(
+                  googleConnection.accountId || ""
+                ),
+              kind:
+                "merchantCenters",
+              options:
+                discoveredMerchantCenters,
+            });
+          }
+        } catch (error) {
+          console.warn(
+            "[Merchant Center Discovery] Failed",
+            {
+              errorName:
+                error instanceof Error
+                  ? error.name
+                  : "UnknownError",
+            }
+          );
+
+          /*
+           * Previous Merchant Center cache is preserved.
+           */
+        }
+      }
 
       if (shouldLoadGa4Assets) {
         try {
@@ -233,10 +587,33 @@ export async function loader({ request }: LoaderFunctionArgs) {
               getGoogleAnalyticsProperties(accessToken)
           );
 
-          assets.google.ga4Properties = ga4Properties.map((property) => ({
-            value: property.propertyId,
-            label: formatGa4PropertyLabel(property),
-          }));
+          const discoveredGa4Properties =
+            ga4Properties.map((property) => ({
+              value:
+                property.propertyId,
+              label:
+                formatGa4PropertyLabel(property),
+            }));
+
+          if (
+            discoveredGa4Properties.length > 0
+          ) {
+            assets.google.ga4Properties =
+              discoveredGa4Properties;
+
+            await saveGoogleAssetDiscoveryCache({
+              workspaceId:
+                workspace.id,
+              googleAccountId:
+                String(
+                  googleConnection.accountId || ""
+                ),
+              kind:
+                "ga4Properties",
+              options:
+                discoveredGa4Properties,
+            });
+          }
 
           const selection = reconcileGa4Selection(
             savedGa4PropertyId,
@@ -244,14 +621,15 @@ export async function loader({ request }: LoaderFunctionArgs) {
           );
 
           if (selection.stale) {
-            await deleteAssetSelection({
-              workspaceId: workspace.id,
-              platform: "google",
-              assetType: "GA4 Property",
-            });
-            delete savedAssetSelections["google:GA4 Property"];
+            /*
+             * Do not automatically delete the persisted GA4 property.
+             *
+             * A temporary API issue, permission transition, pagination
+             * problem, or reconnect state must not silently destroy the
+             * merchant's previously selected tracking destination.
+             */
             ga4AssetMessage =
-              "The previously selected GA4 property is no longer accessible. Choose a property to continue.";
+              "The previously selected GA4 property was not returned by the latest discovery. The saved selection has been preserved.";
           } else if (ga4Properties.length === 0) {
             ga4AssetMessage =
               "No GA4 properties are accessible to this Google account.";
@@ -363,12 +741,51 @@ id: true,
       })
     : [];
 
+  console.info(
+    "[Configuration Loader] Google asset counts",
+    {
+      googleAdsAccounts:
+        assets.google.googleAdsAccounts.length,
+      ga4Properties:
+        assets.google.ga4Properties.length,
+      merchantCenters:
+        assets.google.merchantCenters.length,
+      savedGoogleAdsAccount:
+        savedAssetSelections[
+          "google:Google Ads Account / Manager Account"
+        ] || null,
+    }
+  );
+
+  const savedMetaTestEventCode =
+    readStoredMetaSecret(
+      savedAssetSelections[
+        "meta:Meta Test Event Code"
+      ]
+    );
+
+  const savedMetaCapiAccessToken =
+    readStoredMetaSecret(
+      savedAssetSelections[
+        "meta:Meta CAPI Access Token"
+      ]
+    );
+
+  /*
+   * The full CAPI token never leaves the server.
+   */
+  const savedMetaCapiAccessTokenPreview =
+    maskMetaCapiToken(
+      savedMetaCapiAccessToken
+    );
+
   return {
     shop: session.shop,
     navQuery: navParams.toString(),
     subscription,
     subscriptionVerification,
     redirectedPlanHandle,
+    shouldLoadGoogleAssets,
     shouldLoadGa4Assets,
     shouldLoadMetaAssets,
     unlockPlatform,
@@ -382,11 +799,24 @@ id: true,
     },
     assets,
     ga4AssetMessage,
+    googleAdsAssetMessage,
     savedAssetSelections: {
       ...savedAssetSelections,
-      ["meta:Meta Test Event Code"]: savedAssetSelections["meta:Meta Test Event Code"] && savedAssetSelections["meta:Meta Test Event Code"] !== "none" ? "__configured__" : "none",
-      ["meta:Meta CAPI Access Token"]: savedAssetSelections["meta:Meta CAPI Access Token"] ? "__configured__" : "",
-    },
+
+      /*
+       * Test Event Code is editable and may be shown
+       * to the authenticated merchant.
+       */
+      ["meta:Meta Test Event Code"]:
+        savedMetaTestEventCode ||
+        "none",
+
+      /*
+       * Never send the complete CAPI token to the browser.
+       */
+      ["meta:Meta CAPI Access Token"]:
+        savedMetaCapiAccessTokenPreview,
+    } as Record<string, string>,
     savedAssetSelectionLabels,
     ga4DeliverySettings,
     testModeSettings,
@@ -518,6 +948,58 @@ export async function action({ request }: ActionFunctionArgs) {
       assetLabel,
     });
 
+    /*
+     * GA4, Google Ads, and Merchant Center become active
+     * automatically when an asset is selected.
+     *
+     * Keep the legacy :enabled setting synchronized for
+     * compatibility with any older configuration readers.
+     */
+    if (
+      platform === "google" &&
+      [
+        "GA4 Property",
+        "Google Ads Account / Manager Account",
+        "Google Merchant Center",
+      ].includes(assetType)
+    ) {
+      await saveAssetSelection({
+        workspaceId: workspace.id,
+        platform: "google",
+        assetType: `${assetType}:enabled`,
+        assetValue: "true",
+        assetLabel: "Enabled by asset selection",
+      });
+    }
+
+    if (
+      platform === "google" &&
+      assetType ===
+        "Google Ads Account / Manager Account"
+    ) {
+      const loginCustomerId =
+        String(
+          formData.get(
+            "loginCustomerId"
+          ) || ""
+        )
+          .replace(/-/g, "")
+          .trim();
+
+      await saveAssetSelection({
+        workspaceId: workspace.id,
+        platform: "google",
+        assetType:
+          "Google Ads Login Customer ID",
+        assetValue:
+          loginCustomerId || "none",
+        assetLabel:
+          loginCustomerId
+            ? `Manager ${loginCustomerId}`
+            : "Direct account access",
+      });
+    }
+
     const syncFailure = await synchronizePixel();
     if (syncFailure) return syncFailure;
 
@@ -528,92 +1010,341 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (actionType === "save_meta_dataset_settings") {
-    const datasetId = String(formData.get("datasetId") || "").trim();
-    const datasetName = String(formData.get("datasetName") || "").trim();
-    const selectedEvents = String(formData.get("selectedEvents") || "none").trim() || "none";
+    const datasetId =
+      String(
+        formData.get(
+          "datasetId"
+        ) || ""
+      ).trim();
+
+    const datasetName =
+      String(
+        formData.get(
+          "datasetName"
+        ) || ""
+      ).trim();
+
+    const selectedEvents =
+      String(
+        formData.get(
+          "selectedEvents"
+        ) || "none"
+      ).trim() ||
+      "none";
+
     const clientSideEnabled =
-      String(formData.get("clientSideEnabled") || "false") === "true";
-    const serverSideEnabled =
-      String(formData.get("serverSideEnabled") || "false") === "true";
-    const testEventCode = String(formData.get("testEventCode") || "").trim();
-    const contentIdFormat = String(formData.get("contentIdFormat") || "shopify_country_product_variant").trim();
-    const capiAccessToken = String(formData.get("capiAccessToken") || "").trim();
+      String(
+        formData.get(
+          "clientSideEnabled"
+        ) || "false"
+      ) === "true";
+
+    const requestedServerSideEnabled =
+      String(
+        formData.get(
+          "serverSideEnabled"
+        ) || "false"
+      ) === "true";
+
+    const testEventCode =
+      String(
+        formData.get(
+          "testEventCode"
+        ) || ""
+      ).trim();
+
+    const contentIdFormat =
+      String(
+        formData.get(
+          "contentIdFormat"
+        ) ||
+        "shopify_country_product_variant"
+      ).trim();
+
+    const capiAccessToken =
+      String(
+        formData.get(
+          "capiAccessToken"
+        ) || ""
+      ).trim();
+
+    const requestedCapiTokenMode =
+      String(
+        formData.get(
+          "capiAccessTokenMode"
+        ) || ""
+      ).trim();
 
     if (!datasetId) {
       return Response.json(
-        { ok: false, error: "Please select a Meta Dataset / Pixel first." },
-        { status: 400 }
+        {
+          ok: false,
+          error:
+            "Please select a Meta Dataset / Pixel first.",
+        },
+        {
+          status: 400,
+        }
       );
     }
 
+    /*
+     * Read the existing token only on the server.
+     *
+     * This allows us to distinguish:
+     * - unchanged masked preview
+     * - replacement token
+     * - removal
+     */
+    const existingMetaSelections =
+      await getAssetSelections(
+        workspace.id
+      );
+
+    const existingCapiToken =
+      readStoredMetaSecret(
+        existingMetaSelections[
+          "meta:Meta CAPI Access Token"
+        ]
+      );
+
+    const existingCapiTokenPreview =
+      maskMetaCapiToken(
+        existingCapiToken
+      );
+
+    let capiTokenMode:
+      | "keep"
+      | "replace"
+      | "remove";
+
+    if (
+      requestedCapiTokenMode ===
+        "keep" &&
+      existingCapiToken
+    ) {
+      capiTokenMode =
+        "keep";
+    } else if (
+      requestedCapiTokenMode ===
+        "remove" ||
+      !capiAccessToken
+    ) {
+      capiTokenMode =
+        "remove";
+    } else if (
+      existingCapiToken &&
+      capiAccessToken ===
+        existingCapiTokenPreview
+    ) {
+      /*
+       * Additional protection if an older browser
+       * does not send capiAccessTokenMode.
+       */
+      capiTokenMode =
+        "keep";
+    } else {
+      capiTokenMode =
+        "replace";
+    }
+
+    const hasCapiTokenAfterSave =
+      capiTokenMode === "keep"
+        ? Boolean(
+            existingCapiToken
+          )
+        : capiTokenMode ===
+            "replace"
+          ? Boolean(
+              capiAccessToken
+            )
+          : false;
+
+    /*
+     * Removing the CAPI token automatically disables
+     * server-side Meta delivery.
+     */
+    const serverSideEnabled =
+      requestedServerSideEnabled &&
+      hasCapiTokenAfterSave;
+
     await saveAssetSelection({
-      workspaceId: workspace.id,
-      platform: "meta",
-      assetType: "Meta Dataset / Pixel",
-      assetValue: datasetId,
-      assetLabel: datasetName || datasetId,
+      workspaceId:
+        workspace.id,
+      platform:
+        "meta",
+      assetType:
+        "Meta Dataset / Pixel",
+      assetValue:
+        datasetId,
+      assetLabel:
+        datasetName ||
+        datasetId,
     });
 
     await saveAssetSelection({
-      workspaceId: workspace.id,
-      platform: "meta",
-      assetType: "Meta Selected Events",
-      assetValue: selectedEvents,
-      assetLabel: selectedEvents === "none" ? "No events selected" : selectedEvents,
+      workspaceId:
+        workspace.id,
+      platform:
+        "meta",
+      assetType:
+        "Meta Selected Events",
+      assetValue:
+        selectedEvents,
+      assetLabel:
+        selectedEvents === "none"
+          ? "No events selected"
+          : selectedEvents,
     });
 
     await saveAssetSelection({
-      workspaceId: workspace.id,
-      platform: "meta",
-      assetType: "Meta Client Side Enabled",
-      assetValue: clientSideEnabled ? "true" : "false",
-      assetLabel: clientSideEnabled ? "Enabled" : "Disabled",
+      workspaceId:
+        workspace.id,
+      platform:
+        "meta",
+      assetType:
+        "Meta Client Side Enabled",
+      assetValue:
+        clientSideEnabled
+          ? "true"
+          : "false",
+      assetLabel:
+        clientSideEnabled
+          ? "Enabled"
+          : "Disabled",
     });
 
     await saveAssetSelection({
-      workspaceId: workspace.id,
-      platform: "meta",
-      assetType: "Meta Server Side Enabled",
-      assetValue: serverSideEnabled ? "true" : "false",
-      assetLabel: serverSideEnabled ? "Enabled" : "Disabled",
+      workspaceId:
+        workspace.id,
+      platform:
+        "meta",
+      assetType:
+        "Meta Server Side Enabled",
+      assetValue:
+        serverSideEnabled
+          ? "true"
+          : "false",
+      assetLabel:
+        serverSideEnabled
+          ? "Enabled"
+          : "Disabled",
     });
 
-    if (testEventCode && testEventCode !== "__configured__") {
+    /*
+     * TEST EVENT CODE
+     *
+     * Blank means remove.
+     */
+    if (
+      testEventCode &&
+      testEventCode !==
+        "__configured__" &&
+      testEventCode !==
+        "__saved__"
+    ) {
       await saveAssetSelection({
-        workspaceId: workspace.id,
-        platform: "meta",
-        assetType: "Meta Test Event Code",
-        assetValue: `enc:v1:${encryptToken(testEventCode)}`,
-        assetLabel: "Test event code configured",
+        workspaceId:
+          workspace.id,
+        platform:
+          "meta",
+        assetType:
+          "Meta Test Event Code",
+        assetValue:
+          `enc:v1:${encryptToken(
+            testEventCode
+          )}`,
+        assetLabel:
+          "Test event code configured",
+      });
+    } else if (
+      !testEventCode
+    ) {
+      await deleteAssetSelection({
+        workspaceId:
+          workspace.id,
+        platform:
+          "meta",
+        assetType:
+          "Meta Test Event Code",
       });
     }
 
     await saveAssetSelection({
-      workspaceId: workspace.id,
-      platform: "meta",
-      assetType: "Meta Content ID Format",
-      assetValue: contentIdFormat,
-      assetLabel: contentIdFormat,
+      workspaceId:
+        workspace.id,
+      platform:
+        "meta",
+      assetType:
+        "Meta Content ID Format",
+      assetValue:
+        contentIdFormat,
+      assetLabel:
+        contentIdFormat,
     });
 
-    if (capiAccessToken) {
+    /*
+     * CAPI ACCESS TOKEN
+     */
+    if (
+      capiTokenMode ===
+        "replace"
+    ) {
+      const preview =
+        maskMetaCapiToken(
+          capiAccessToken
+        );
+
       await saveAssetSelection({
-        workspaceId: workspace.id,
-        platform: "meta",
-        assetType: "Meta CAPI Access Token",
-        assetValue: `enc:v1:${encryptToken(capiAccessToken)}`,
-        assetLabel: `Saved token ending ${capiAccessToken.slice(-6)}`,
+        workspaceId:
+          workspace.id,
+        platform:
+          "meta",
+        assetType:
+          "Meta CAPI Access Token",
+        assetValue:
+          `enc:v1:${encryptToken(
+            capiAccessToken
+          )}`,
+        assetLabel:
+          preview
+            ? `Saved token ${preview}`
+            : "Access token configured",
+      });
+    } else if (
+      capiTokenMode ===
+        "remove"
+    ) {
+      await deleteAssetSelection({
+        workspaceId:
+          workspace.id,
+        platform:
+          "meta",
+        assetType:
+          "Meta CAPI Access Token",
       });
     }
 
-    const syncFailure = await synchronizePixel();
-    if (syncFailure) return syncFailure;
+    const syncFailure =
+      await synchronizePixel();
+
+    if (syncFailure) {
+      return syncFailure;
+    }
 
     return Response.json({
       ok: true,
-      message: "Meta Dataset / Pixel settings saved.",
+
+      message:
+        "Meta Dataset / Pixel settings saved.",
+
+      serverSideEnabled,
+
+      capiTokenConfigured:
+        hasCapiTokenAfterSave,
     });
   }
+
 
   if (actionType === "save_ga4_delivery_settings") {
     const propertyId = String(formData.get("propertyId") || "");
@@ -672,8 +1403,29 @@ export async function action({ request }: ActionFunctionArgs) {
   }
 
   if (actionType === "save_google_conversions") {
-    const googleAdsCustomerId = String(formData.get("googleAdsCustomerId") || "");
-    const setupType = String(formData.get("setupType") || "default");
+    const googleAdsCustomerId =
+      String(
+        formData.get(
+          "googleAdsCustomerId"
+        ) || ""
+      )
+        .replace(/-/g, "")
+        .trim();
+
+    const googleAdsLoginCustomerId =
+      String(
+        formData.get(
+          "googleAdsLoginCustomerId"
+        ) || ""
+      )
+        .replace(/-/g, "")
+        .trim();
+
+    const setupType =
+      String(
+        formData.get("setupType") ||
+        "default"
+      );
     const conversionName = String(formData.get("conversionName") || "").trim();
     const conversionActionRecordId = String(formData.get("conversionActionRecordId") || "").trim();
     const isPrimary = String(formData.get("isPrimary") || "true") === "true";
@@ -699,9 +1451,20 @@ export async function action({ request }: ActionFunctionArgs) {
       );
     }
 
-    if (!conversionName) {
+    if (
+      deliveryMode === "server" &&
+      events.some(
+        (eventName) =>
+          String(eventName).toUpperCase() !==
+          "PURCHASE"
+      )
+    ) {
       return Response.json(
-        { ok: false, error: "Please enter a conversion name." },
+        {
+          ok: false,
+          error:
+            "Server-side Google Ads delivery currently supports Purchase only. Use client-side delivery for other conversion events.",
+        },
         { status: 400 }
       );
     }
@@ -736,9 +1499,14 @@ export async function action({ request }: ActionFunctionArgs) {
       try {
         const action = await createOrReuseGoogleAdsConversionAction({
           accessToken: googleAccessToken,
-          customerId: googleAdsCustomerId,
+          customerId:
+            googleAdsCustomerId,
+          loginCustomerId:
+            googleAdsLoginCustomerId ||
+            undefined,
           eventName,
-          baseName: conversionName,
+          baseName:
+            conversionName,
           conversionValueMode,
           isPrimary,
         });
@@ -835,31 +1603,59 @@ export async function action({ request }: ActionFunctionArgs) {
       },
     });
 
-    const configs = await db.googleConversionConfig.findMany({
-      where: {
-        workspaceId: workspace.id,
-        googleAdsCustomerId: conversionAction.googleAdsCustomerId,
-        isActive: true,
-      },
-      select: {
-        id: true,
-        events: true,
-      },
-    });
+    const remainingActiveMappings =
+      await db.googleAdsConversionAction.count({
+        where: {
+          workspaceId: workspace.id,
+          googleAdsCustomerId:
+            conversionAction.googleAdsCustomerId,
+          eventName:
+            conversionAction.eventName,
+          isActive: true,
+        },
+      });
 
-    for (const config of configs) {
-      if (config.events.includes(conversionAction.eventName)) {
-        await db.googleConversionConfig.update({
+    /*
+     * Only remove the event from the legacy aggregate config
+     * when no other active conversion mapping still uses it.
+     */
+    if (remainingActiveMappings === 0) {
+      const configs =
+        await db.googleConversionConfig.findMany({
           where: {
-            id: config.id,
+            workspaceId: workspace.id,
+            googleAdsCustomerId:
+              conversionAction.googleAdsCustomerId,
+            isActive: true,
           },
-          data: {
-            events: config.events.filter(
-              (event: (typeof config.events)[number]) =>
-                event !== conversionAction.eventName
-            ),
+          select: {
+            id: true,
+            events: true,
           },
         });
+
+      for (const config of configs) {
+        if (
+          config.events.includes(
+            conversionAction.eventName
+          )
+        ) {
+          await db.googleConversionConfig.update({
+            where: {
+              id: config.id,
+            },
+            data: {
+              events: config.events.filter(
+                (
+                  event:
+                    (typeof config.events)[number]
+                ) =>
+                  event !==
+                  conversionAction.eventName
+              ),
+            },
+          });
+        }
       }
     }
 
@@ -877,10 +1673,35 @@ export async function action({ request }: ActionFunctionArgs) {
     const merchantId = String(formData.get("merchantId") || "").replace(/-/g, "").trim();
     const selectedTargetCountry = String(formData.get("targetCountry") || "US").trim() || "US";
     const customTargetCountry = String(formData.get("customTargetCountry") || "").trim().toUpperCase();
+    if (
+      selectedTargetCountry === "CUSTOM" &&
+      !/^[A-Z]{2}$/.test(customTargetCountry)
+    ) {
+      return Response.json(
+        {
+          ok: false,
+          error:
+            "Please enter a valid two-letter custom target country code.",
+        },
+        { status: 400 }
+      );
+    }
+
     const targetCountry =
-      selectedTargetCountry === "CUSTOM" && customTargetCountry
+      selectedTargetCountry === "CUSTOM"
         ? customTargetCountry
-        : selectedTargetCountry;
+        : selectedTargetCountry.toUpperCase();
+
+    if (!/^[A-Z]{2}$/.test(targetCountry)) {
+      return Response.json(
+        {
+          ok: false,
+          error: "Invalid target country code.",
+        },
+        { status: 400 }
+      );
+    }
+
     const contentLanguage = String(formData.get("contentLanguage") || "en").trim() || "en";
     const productIdFormat = String(formData.get("productIdFormat") || "shopify_country_product_variant").trim();
     const channel = String(formData.get("channel") || "online").trim();
@@ -1034,6 +1855,170 @@ const platformConfigs = [
   },
 ];
 
+
+const FIELD_HELP: Record<string, string> = {
+  "GA4 Property":
+    "Select the GA4 property for this Shopify store. After selection it is locked to help prevent events being sent to the wrong property. Reconnect Google when you intentionally need to change it.",
+
+  "Google Ads Account / Manager Account":
+    "Select the Google Ads customer account that should receive conversions. Conversion actions normally belong to the advertising client account. Manager accounts can provide access to client accounts.",
+
+  "Google Merchant Center":
+    "Select the Merchant Center account that should receive the Shopify product feed.",
+
+  "Google Ads Remarketing":
+    "Enable Google Ads remarketing and configure the Shopify ecommerce events and product identifiers used for remarketing.",
+
+  "Meta Business Portfolio":
+    "Select the Meta Business Portfolio that owns the Dataset / Pixel used for this Shopify store.",
+
+  "Meta Dataset / Pixel":
+    "Select the Meta Dataset / Pixel that should receive browser Pixel events and supported server-side Conversions API events.",
+
+  "TikTok Ad Account":
+    "Select the TikTok Ads account used by this Shopify store.",
+
+  "TikTok Pixel":
+    "Select the TikTok Pixel that should receive supported client-side Shopify events.",
+
+  "TikTok Events API Destination":
+    "Select the TikTok Events API destination used for supported server-side event delivery.",
+
+  "TikTok Catalog":
+    "Select the TikTok product catalog associated with this store when catalog functionality is available.",
+
+  "Pinterest Ad Account":
+    "Select the Pinterest advertising account used for this store.",
+
+  "Pinterest Tag":
+    "Select the Pinterest Tag used for supported conversion and audience tracking.",
+
+  "Pinterest Catalog":
+    "Select the Pinterest catalog used for product matching and catalog advertising.",
+
+  "Microsoft Ads Account":
+    "Select the Microsoft Advertising account that should receive conversion data.",
+
+  "Microsoft UET Tag":
+    "Select the Microsoft UET tag used for website events, audiences, and Microsoft Ads conversion goals.",
+
+  "Microsoft Merchant Center":
+    "Select the Microsoft Merchant Center store used for product advertising.",
+
+  "LinkedIn Ad Account":
+    "Select the LinkedIn Campaign Manager account used for this Shopify store.",
+
+  "LinkedIn Insight Tag":
+    "Select the LinkedIn Insight Tag used for supported browser-side tracking.",
+
+  "LinkedIn Conversion Rule":
+    "Select the LinkedIn conversion rule used for supported conversion reporting.",
+
+  "Selected GA4 Property":
+    "Shows the GA4 property currently selected for this Shopify store.",
+
+  "GA4 Data Stream / Measurement ID":
+    "Select the GA4 web stream for this store. The Measurement ID normally starts with G- and identifies where GA4 events are sent.",
+
+  "GA4 Measurement ID":
+    "Enter the GA4 web Measurement ID, normally beginning with G-. Use this when the web stream could not be discovered automatically.",
+
+  "GA4 Delivery Mode":
+    "Client-side sends events through the Shopify Customer Events browser pixel. Server-side sends supported selected events from the DH Conversions backend using GA4 Measurement Protocol.",
+
+  "GA4 API Secret":
+    "Required for GA4 server-side Measurement Protocol delivery. Create the API Secret for the selected GA4 web stream.",
+
+  "GA4 Item ID Format":
+    "Controls the item_id format sent with GA4 ecommerce events. For product matching, use the same format as Merchant Center and Google Ads remarketing.",
+
+  "GA4 Events to Send":
+    "Select the Shopify ecommerce events that should be delivered to GA4.",
+
+  "Selected Google Ads Account":
+    "Shows the Google Ads customer account where conversion actions will be created or reused.",
+
+  "Conversion Event":
+    "Select the Shopify event that should trigger this Google Ads conversion action. Purchase is normally used for sales and Lead for lead generation.",
+
+  "Conversion Name":
+    "Optional. If you enter a custom name, DH Conversions uses that exact name in Google Ads. Leave it blank to use the default DH - Event Name format.",
+
+  "Goal Role":
+    "Primary conversions are normally used for bidding and the Conversions column. Secondary conversions are generally used for observation and All conversions.",
+
+  "Conversion Value":
+    "Dynamic uses the Shopify event or order value. Fixed uses a configured default. No value is for conversions where monetary value is not required.",
+
+  "Google Ads Item ID Format":
+    "Controls product IDs sent with Google Ads ecommerce data. Match this format to the Merchant Center offer ID format.",
+
+  "Google Ads Delivery Mode":
+    "Client-side uses browser-side Google tagging. Server-side sends supported conversion data from the application backend using Google APIs.",
+
+  "Remarketing Item ID Format":
+    "Select the product identifier format used by Google Ads remarketing. It should match Merchant Center product IDs.",
+
+  "Remarketing Events":
+    "Select which Shopify ecommerce interactions should be used for Google Ads remarketing.",
+
+  "Dataset / Pixel":
+    "Select the Meta Dataset / Pixel used for this Shopify store.",
+
+  "Meta Test Event Code":
+    "Optional code from Meta Events Manager. Use it while testing supported CAPI events in the Meta Test Events view.",
+
+  "Meta CAPI Access Token":
+    "Required for Meta server-side Conversions API delivery. Use a token authorized for the selected Dataset / Pixel.",
+
+  "Content ID / Product ID Format":
+    "Controls Meta content_ids. Use the same format for Meta Pixel, CAPI, and the corresponding Meta catalog.",
+
+  "Meta Delivery Options":
+    "Client-side Meta Pixel sends browser events. Server-side Meta CAPI sends supported events from the application backend.",
+
+  "Meta Events":
+    "Select the Shopify events that should be sent to the selected Meta Dataset / Pixel.",
+
+  "Selected Merchant Center":
+    "Shows the Merchant Center account that will receive the Shopify product feed.",
+
+  "Target Country":
+    "Select the target country for the Merchant Center product feed. Countries are shown as Country Name - ISO Code. Choose Custom country code only when needed.",
+
+  "Custom Target Country Code":
+    "Enter a valid two-letter country or territory code. This field appears only when Custom country code is selected.",
+
+  "Product ID Format":
+    "Controls the Merchant Center offer ID format. Use the same product identifier format in Google Ads remarketing and other catalog integrations.",
+
+  "Product Channel":
+    "Online is for normal ecommerce products sold on the website. Local is for supported local inventory configurations.",
+
+  "Marketing Methods":
+    "Choose whether products are intended for Free Listings, Shopping Ads, or both.",
+
+  "Feed Update Schedule":
+    "Choose how frequently the Merchant Center feed should be updated when scheduled synchronization is enabled.",
+
+  "Feed Creation Method":
+    "Controls which Shopify products are included. The currently supported option uses active in-stock products.",
+
+  "Category / Collection":
+    "Used when collection-based feed creation becomes available.",
+
+  "Restricted Products":
+    "Restricted or adult-related products are skipped by default. Enable this only when the merchant intentionally wants them included and understands platform policies."
+};
+
+function getFieldHelp(platformKey: string, field: string) {
+  return (
+    FIELD_HELP[`${platformKey}:${field}`] ||
+    FIELD_HELP[field] ||
+    `Configure the ${field} used by this connected platform.`
+  );
+}
+
 export default function ConfigurationPage() {
   const {
     shop,
@@ -1041,6 +2026,8 @@ export default function ConfigurationPage() {
     connections,
     assets,
     ga4AssetMessage,
+    googleAdsAssetMessage,
+    shouldLoadGoogleAssets,
     unlockPlatform,
     savedAssetSelections,
     savedAssetSelectionLabels,
@@ -1049,8 +2036,56 @@ export default function ConfigurationPage() {
     webPixelStatus,
     googleAdsConversionActions,
   } = useLoaderData<typeof loader>();
+
+  /*
+   * Keep successful Google discovery results alive while the
+   * loadGoogleAssets/loadGa4Assets query parameters are removed.
+   *
+   * React Router performs another loader request after navigate()
+   * cleans the URL. Normal loader requests deliberately return
+   * empty Google asset arrays, so without this cache the freshly
+   * discovered GA4 / Google Ads / Merchant Center options vanish.
+   */
+  const [cachedGoogleAssets, setCachedGoogleAssets] =
+    useState(() => ({
+      ga4Properties: assets.google.ga4Properties || [],
+      ga4DataStreams: assets.google.ga4DataStreams || [],
+      googleAdsAccounts: assets.google.googleAdsAccounts || [],
+      merchantCenters: assets.google.merchantCenters || [],
+    }));
+
+  useEffect(() => {
+    setCachedGoogleAssets((current) => ({
+      ga4Properties:
+        assets.google.ga4Properties?.length
+          ? assets.google.ga4Properties
+          : current.ga4Properties,
+
+      ga4DataStreams:
+        assets.google.ga4DataStreams?.length
+          ? assets.google.ga4DataStreams
+          : current.ga4DataStreams,
+
+      googleAdsAccounts:
+        assets.google.googleAdsAccounts?.length
+          ? assets.google.googleAdsAccounts
+          : current.googleAdsAccounts,
+
+      merchantCenters:
+        assets.google.merchantCenters?.length
+          ? assets.google.merchantCenters
+          : current.merchantCenters,
+    }));
+  }, [
+    assets.google.ga4Properties,
+    assets.google.ga4DataStreams,
+    assets.google.googleAdsAccounts,
+    assets.google.merchantCenters,
+  ]);
+
   const location = useLocation();
   const navigate = useNavigate();
+  const revalidator = useRevalidator();
   const withNav = (path: string) => {
     const [basePath, existingQuery = ""] = path.split("?");
     const params = new URLSearchParams(existingQuery);
@@ -1075,26 +2110,35 @@ export default function ConfigurationPage() {
     | { ok?: boolean; error?: string; message?: string }
     | undefined;
   const conversionResult = conversionFetcher.data as
-    | { ok?: boolean; error?: string; message?: string }
+    | {
+        ok?: boolean;
+        error?: string;
+        message?: string;
+        details?: string;
+      }
     | undefined;
   const [selectedAssets, setSelectedAssets] =
     useState<Record<string, string>>(savedAssetSelections || {});
 
   const [unlockedAssetFields, setUnlockedAssetFields] =
     useState<Set<string>>(() => {
+      /*
+       * Google Connect/Reconnect uses unlockPlatform=google
+       * only as a transient navigation marker.
+       *
+       * A successful OAuth reconnect must not temporarily
+       * unlock already-selected Google destinations.
+       *
+       * Fields with no saved selection remain selectable
+       * through the normal field-locking logic.
+       */
       const fields =
-        unlockPlatform === "google"
+        unlockPlatform === "meta"
           ? [
-              "GA4 Property",
-              "Google Ads Account / Manager Account",
-              "Google Merchant Center",
+              "Meta Business Portfolio",
+              "Meta Dataset / Pixel",
             ]
-          : unlockPlatform === "meta"
-            ? [
-                "Meta Business Portfolio",
-                "Meta Dataset / Pixel",
-              ]
-            : [];
+          : [];
 
       return new Set(
         fields.map((field) => `${unlockPlatform}:${field}`)
@@ -1106,6 +2150,15 @@ export default function ConfigurationPage() {
       return;
     }
 
+    /*
+     * IMPORTANT:
+     *
+     * Use React Router navigation rather than history.replaceState().
+     * Raw browser history replacement changes the visible URL but does
+     * not reliably update React Router's internal location. Fetcher POSTs
+     * and revalidations could therefore continue carrying
+     * loadGoogleAssets=true and repeatedly trigger Google API discovery.
+     */
     const currentUrl = new URL(window.location.href);
 
     currentUrl.searchParams.delete("unlockPlatform");
@@ -1113,19 +2166,188 @@ export default function ConfigurationPage() {
     currentUrl.searchParams.delete("loadGa4Assets");
     currentUrl.searchParams.delete("loadMetaAssets");
 
-    window.history.replaceState(
-      window.history.state,
-      "",
-      `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`
+    navigate(
+      `${currentUrl.pathname}${currentUrl.search}${currentUrl.hash}`,
+      { replace: true }
     );
-  }, [unlockPlatform]);
+  }, [unlockPlatform, navigate]);
+
+
+  useEffect(() => {
+    setSelectedAssets(
+      savedAssetSelections || {}
+    );
+
+    setTestModeEnabled(
+      Boolean(
+        testModeSettings?.enabled
+      )
+    );
+
+    setGa4DeliveryMode(
+      ga4DeliverySettings
+        ?.setting
+        ?.deliveryMode ===
+        "server"
+        ? "server"
+        : "client"
+    );
+
+    const savedTokenPreview =
+      String(
+        savedAssetSelections?.[
+          "meta:Meta CAPI Access Token"
+        ] || ""
+      );
+
+    /*
+     * The browser receives only the masked preview,
+     * never the complete stored token.
+     */
+    setMetaCapiAccessTokenInput(
+      savedTokenPreview
+    );
+
+    setMetaCapiAccessTokenSavedOverride(
+      Boolean(
+        savedTokenPreview
+      )
+    );
+  }, [
+    savedAssetSelections,
+    testModeSettings?.enabled,
+    ga4DeliverySettings?.setting?.deliveryMode,
+  ]);
+
+  /*
+   * Do not revalidate Configuration merely because
+   * the merchant switches browser tabs.
+   *
+   * This protects unsaved Meta Test Event Codes,
+   * access tokens, event choices and delivery settings.
+   * Successful actions still trigger normal router
+   * revalidation.
+   */
 
   const assetSelectionFetcher = useFetcher();
+
+  const savedGoogleAdsAccountValue =
+    selectedAssets[
+      "google:Google Ads Account / Manager Account"
+    ] || "";
+
+  const discoveredGoogleAdsAccounts: AssetOption[] =
+    cachedGoogleAssets.googleAdsAccounts || [];
+
+  const savedGoogleAdsAccountLabel =
+    savedAssetSelectionLabels[
+      "google:Google Ads Account / Manager Account"
+    ] ||
+    (savedGoogleAdsAccountValue
+      ? `Google Ads Account ${savedGoogleAdsAccountValue}`
+      : "");
+
+  /*
+   * Ordinary settings-page loads intentionally do not call the
+   * Google Ads discovery API.
+   *
+   * If a destination was already saved, keep it visible even
+   * when discovery was not requested or Google temporarily
+   * returned a rate-limit/API error.
+   */
+  const validatedGoogleAdsAccounts: AssetOption[] =
+    savedGoogleAdsAccountValue &&
+    !discoveredGoogleAdsAccounts.some(
+      (option) =>
+        option.value === savedGoogleAdsAccountValue
+    )
+      ? [
+          {
+            value: savedGoogleAdsAccountValue,
+            label: savedGoogleAdsAccountLabel,
+            loginCustomerId:
+              selectedAssets[
+                "google:Google Ads Login Customer ID"
+              ] === "none"
+                ? ""
+                : selectedAssets[
+                    "google:Google Ads Login Customer ID"
+                  ] || "",
+          },
+          ...discoveredGoogleAdsAccounts,
+        ]
+      : discoveredGoogleAdsAccounts;
+
+  const googleAdsAccountStillAvailable =
+    Boolean(
+      savedGoogleAdsAccountValue &&
+      validatedGoogleAdsAccounts.some(
+        (option) =>
+          option.value ===
+          savedGoogleAdsAccountValue
+      )
+    );
+
+  /*
+   * Keep the persisted Google Ads destination unless the merchant
+   * explicitly changes/reconnects it.
+   *
+   * An empty discovery result can mean timeout, rate limiting,
+   * temporary Google API failure, or permission failure for only
+   * some accessible customers. It must never silently delete a
+   * previously saved conversion destination.
+   */
+  const googleAdsAccountValue =
+    savedGoogleAdsAccountValue || "";
+
+  /*
+   * During an explicit discovery request we can still tell whether
+   * the stored customer appeared in Google's latest successful list.
+   * This is informational only; it is deliberately NOT destructive.
+   */
+  const googleAdsSavedAccountValidated =
+    !savedGoogleAdsAccountValue ||
+    !shouldLoadGoogleAssets ||
+    googleAdsAccountStillAvailable;
+
+  void googleAdsSavedAccountValidated;
+
+
+  const metaBusinessFetcher = useFetcher();
+
+  const metaBusinessResult =
+    metaBusinessFetcher.data as
+      | {
+          ok?: boolean;
+          saved?: boolean;
+          syncFailed?: boolean;
+          warning?: string;
+          error?: string;
+          message?: string;
+        }
+      | undefined;
+
+  const [
+    metaBusinessDrafting,
+    setMetaBusinessDrafting,
+  ] = useState(false);
+
   const metaDatasetFetcher = useFetcher();
-  const metaDatasetResult = metaDatasetFetcher.data as
-    | { ok?: boolean; error?: string; message?: string }
-    | undefined;
-  const metaBusinessOptions = assets.meta?.businessPortfolios || [];
+
+  const metaDatasetResult =
+    metaDatasetFetcher.data as
+      | {
+          ok?: boolean;
+          saved?: boolean;
+          syncFailed?: boolean;
+          warning?: string;
+          error?: string;
+          message?: string;
+        }
+      | undefined;
+
+  const metaBusinessOptions =
+    assets.meta?.businessPortfolios || [];
   const metaBusinessKey = "meta:Meta Business Portfolio";
   const metaBusinessValue = selectedAssets[metaBusinessKey] || "";
   const selectedMetaBusinessLabel =
@@ -1136,11 +2358,31 @@ export default function ConfigurationPage() {
   const metaDatasetOptions = assets.meta?.datasetsPixels || [];
   const metaDatasetKey = "meta:Meta Dataset / Pixel";
   const metaDatasetValue = selectedAssets[metaDatasetKey] || "";
-  const metaBusinessLocked = isLockedAssetField(
-    "meta",
-    "Meta Business Portfolio",
-    metaBusinessValue
-  );
+  const metaBusinessLocked =
+    isLockedAssetField(
+      "meta",
+      "Meta Business Portfolio",
+      metaBusinessValue
+    );
+
+  /*
+   * Existing persisted Portfolio:
+   *   locked + no local draft
+   *
+   * Newly saved Portfolio:
+   *   fetcher must confirm success first.
+   */
+  const metaBusinessConfirmed =
+    !metaBusinessDrafting &&
+    metaBusinessFetcher.state === "idle" &&
+    (
+      metaBusinessResult
+        ? Boolean(
+            metaBusinessResult.ok ||
+            metaBusinessResult.saved
+          )
+        : metaBusinessLocked
+    );
   const metaDatasetLocked = isLockedAssetField(
     "meta",
     "Meta Dataset / Pixel",
@@ -1180,6 +2422,131 @@ export default function ConfigurationPage() {
     metaCapiAccessTokenSaved
       ? "Access token saved"
       : "No CAPI access token saved";
+
+  /*
+   * SAVED BASELINE
+   *
+   * Used to decide whether the primary button should
+   * say Close or Save.
+   */
+  const savedMetaDatasetValue =
+    String(
+      savedAssetSelections[
+        "meta:Meta Dataset / Pixel"
+      ] || ""
+    );
+
+  const savedMetaEvents =
+    String(
+      savedAssetSelections[
+        "meta:Meta Selected Events"
+      ] || "none"
+    );
+
+  const savedMetaClientSide =
+    String(
+      savedAssetSelections[
+        "meta:Meta Client Side Enabled"
+      ] || "false"
+    );
+
+  const savedMetaServerSide =
+    String(
+      savedAssetSelections[
+        "meta:Meta Server Side Enabled"
+      ] || "false"
+    );
+
+  const savedMetaTestEventCode =
+    String(
+      savedAssetSelections[
+        "meta:Meta Test Event Code"
+      ] || "none"
+    );
+
+  const savedMetaTestEventCodeValue =
+    savedMetaTestEventCode ===
+      "none"
+      ? ""
+      : savedMetaTestEventCode;
+
+  const savedMetaContentIdFormat =
+    String(
+      savedAssetSelections[
+        "meta:Meta Content ID Format"
+      ] ||
+      "shopify_country_product_variant"
+    );
+
+  const savedMetaCapiAccessTokenPreview =
+    String(
+      savedAssetSelections[
+        "meta:Meta CAPI Access Token"
+      ] || ""
+    );
+
+  const normalizeMetaEventList = (
+    value: string
+  ) => {
+    const events =
+      String(
+        value || "none"
+      )
+        .split(",")
+        .map(
+          (item) =>
+            item.trim()
+        )
+        .filter(
+          (item) =>
+            item &&
+            item !== "none"
+        )
+        .sort();
+
+    return events.length
+      ? events.join(",")
+      : "none";
+  };
+
+  const metaDatasetHasSavedConfig =
+    Boolean(
+      savedMetaDatasetValue
+    );
+
+  const metaDatasetIsDirty =
+    metaDatasetValue !==
+      savedMetaDatasetValue ||
+
+    normalizeMetaEventList(
+      rawMetaSelectedEvents
+    ) !==
+      normalizeMetaEventList(
+        savedMetaEvents
+      ) ||
+
+    (
+      metaClientSideEnabled
+        ? "true"
+        : "false"
+    ) !==
+      savedMetaClientSide ||
+
+    (
+      metaServerSideEnabled
+        ? "true"
+        : "false"
+    ) !==
+      savedMetaServerSide ||
+
+    metaTestEventCode !==
+      savedMetaTestEventCodeValue ||
+
+    metaContentIdFormat !==
+      savedMetaContentIdFormat ||
+
+    metaCapiAccessTokenInput !==
+      savedMetaCapiAccessTokenPreview;
 
   const feedFetcher = useFetcher();
   const feedResult = feedFetcher.data as
@@ -1245,13 +2612,56 @@ export default function ConfigurationPage() {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const [feedIncludeRestrictedProducts, setFeedIncludeRestrictedProducts] = useState(false);
 
-  const ga4PropertyValue =
+  const savedGa4PropertyValue =
     selectedAssets["google:GA4 Property"] || "";
+
+  const discoveredGa4Properties: AssetOption[] =
+    cachedGoogleAssets.ga4Properties || [];
+
+  const savedGa4PropertyLabel =
+    savedAssetSelectionLabels[
+      "google:GA4 Property"
+    ] ||
+    (savedGa4PropertyValue
+      ? `GA4 Property ${savedGa4PropertyValue}`
+      : "");
+
+  /*
+   * Normal settings-page loads intentionally skip Google API
+   * discovery. Preserve the persisted GA4 property in the
+   * dropdown so the UI does not become blank after the
+   * loadGa4Assets/loadGoogleAssets query parameter is removed.
+   */
+  const validatedGa4Properties: AssetOption[] =
+    savedGa4PropertyValue &&
+    !discoveredGa4Properties.some(
+      (option) =>
+        option.value === savedGa4PropertyValue
+    )
+      ? [
+          {
+            value: savedGa4PropertyValue,
+            label: savedGa4PropertyLabel,
+          },
+          ...discoveredGa4Properties,
+        ]
+      : discoveredGa4Properties;
+
+  const ga4PropertyValue =
+    savedGa4PropertyValue;
+
   const ga4ApiSecretConfigured =
     ga4DeliveryResult?.apiSecretConfigured ??
     isGa4ApiSecretConfigured(ga4DeliverySettings?.credential?.tokenStatus);
-  const googleAdsAccountValue =
-    selectedAssets["google:Google Ads Account / Manager Account"] || "";
+  const googleAdsLoginCustomerId =
+    selectedAssets[
+      "google:Google Ads Login Customer ID"
+    ] === "none"
+      ? ""
+      : selectedAssets[
+          "google:Google Ads Login Customer ID"
+        ] || "";
+
   const merchantCenterValue =
     selectedAssets["google:Google Merchant Center"] || "";
   const googleRemarketingValue =
@@ -1304,9 +2714,26 @@ export default function ConfigurationPage() {
     });
   }
 
-  const merchantCountryCodes = "AF AX AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ BM BT BO BQ BA BW BV BR IO BN BG BF BI KH CM CA CV KY CF TD CL CN CX CC CO KM CG CD CK CR CI HR CU CW CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KW KG LA LV LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY PE PH PN PL PT PR QA RE RO RU RW BL SH KN LC MF PM VC WS SM ST SA SN RS SC SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH TW TJ TZ TH TL TG TK TO TT TN TR TM TC TV UG UA AE GB UM US UY UZ VU VE VN VG VI WF EH YE ZM ZW"
-    .split(" ")
-    .filter(Boolean);
+  const merchantCountryCodes =
+    "AF AX AL DZ AS AD AO AI AQ AG AR AM AW AU AT AZ BS BH BD BB BY BE BZ BJ BM BT BO BQ BA BW BV BR IO BN BG BF BI KH CM CA CV KY CF TD CL CN CX CC CO KM CG CD CK CR CI HR CU CW CY CZ DK DJ DM DO EC EG SV GQ ER EE SZ ET FK FO FJ FI FR GF PF TF GA GM GE DE GH GI GR GL GD GP GU GT GG GN GW GY HT HM VA HN HK HU IS IN ID IR IQ IE IM IL IT JM JP JE JO KZ KE KI KP KW KG LA LV LB LS LR LY LI LT LU MO MG MW MY MV ML MT MH MQ MR MU YT MX FM MD MC MN ME MS MA MZ MM NA NR NP NL NC NZ NI NE NG NU NF MK MP NO OM PK PW PS PA PG PY PE PH PN PL PT PR QA RE RO RU RW BL SH KN LC MF PM VC WS SM ST SA SN RS SC SL SG SX SK SI SB SO ZA GS SS ES LK SD SR SJ SE CH TW TJ TZ TH TL TG TK TO TT TN TR TM TC TV UG UA AE GB UM US UY UZ VU VE VN VG VI WF EH YE ZM ZW"
+      .split(" ")
+      .filter(Boolean);
+
+  const merchantRegionNames =
+    typeof Intl !== "undefined" &&
+    typeof Intl.DisplayNames !== "undefined"
+      ? new Intl.DisplayNames(["en"], { type: "region" })
+      : null;
+
+  const merchantCountryOptions =
+    merchantCountryCodes
+      .map((code) => ({
+        code,
+        name: merchantRegionNames?.of(code) || code,
+      }))
+      .sort((a, b) =>
+        a.name.localeCompare(b.name)
+      );
 
   function fieldKey(platformKey: string, field: string) {
     return `${platformKey}:${field}`;
@@ -1362,6 +2789,20 @@ export default function ConfigurationPage() {
     return `${platformKey}:${field}:${setting}`;
   }
 
+  function isSelectionActivatedGoogleField(
+    platformKey: string,
+    field: string
+  ) {
+    return (
+      platformKey === "google" &&
+      [
+        "GA4 Property",
+        "Google Ads Account / Manager Account",
+        "Google Merchant Center",
+      ].includes(field)
+    );
+  }
+
   function isTrackingFeatureEnabled(
     platformKey: string,
     field: string
@@ -1371,13 +2812,42 @@ export default function ConfigurationPage() {
       field,
       "enabled"
     );
-    const mainKey = fieldKey(platformKey, field);
 
+    const mainKey = fieldKey(
+      platformKey,
+      field
+    );
+
+    /*
+     * GA4, Google Ads, and Merchant Center use the
+     * selected asset itself as the activation state.
+     *
+     * There is no separate Enable checkbox for these
+     * destinations anymore.
+     */
+    if (
+      isSelectionActivatedGoogleField(
+        platformKey,
+        field
+      )
+    ) {
+      return Boolean(
+        selectedAssets[mainKey]
+      );
+    }
+
+    /*
+     * Google Ads Remarketing remains optional and
+     * therefore keeps its own Enable checkbox.
+     */
     if (
       platformKey === "google" &&
       field === "Google Ads Remarketing"
     ) {
-      return selectedAssets[mainKey] === "enabled";
+      return (
+        selectedAssets[mainKey] ===
+        "enabled"
+      );
     }
 
     if (
@@ -1386,14 +2856,10 @@ export default function ConfigurationPage() {
         enabledKey
       )
     ) {
-      return selectedAssets[enabledKey] === "true";
-    }
-
-    if (
-      platformKey === "google" &&
-      field === "GA4 Property"
-    ) {
-      return false;
+      return (
+        selectedAssets[enabledKey] ===
+        "true"
+      );
     }
 
     if (selectedAssets[mainKey]) {
@@ -1423,10 +2889,10 @@ export default function ConfigurationPage() {
   }
 
   function getFeatureLabel(field: string) {
-    if (field === "GA4 Property") return "Enable GA4";
-    if (field === "Google Ads Account / Manager Account") return "Enable Google Ads conversions";
-    if (field === "Google Merchant Center") return "Enable Google Merchant Center feed";
-    if (field === "Google Ads Remarketing") return "Enable Google Ads remarketing";
+    if (field === "Google Ads Remarketing") {
+      return "Enable Google Ads remarketing";
+    }
+
     return `Enable ${field}`;
   }
 
@@ -1472,6 +2938,7 @@ export default function ConfigurationPage() {
     { value: "remove_from_cart", label: "Remove From Cart" },
     { value: "view_cart", label: "View Cart" },
     { value: "begin_checkout", label: "Begin Checkout" },
+    { value: "add_contact_info", label: "Add Contact Info" },
     { value: "add_shipping_info", label: "Add Shipping Info" },
     { value: "add_payment_info", label: "Add Payment Info" },
     { value: "purchase", label: "Purchase" },
@@ -1580,7 +3047,7 @@ export default function ConfigurationPage() {
 
   function getFieldOptions(platformKey: string, field: string): AssetOption[] {
     if (platformKey === "google" && field === "GA4 Property") {
-      return assets.google.ga4Properties;
+      return validatedGa4Properties;
     }
 
     if (platformKey === "google" && field === "Google Ads Account / Manager Account") {
@@ -1588,7 +3055,7 @@ export default function ConfigurationPage() {
     }
 
     if (platformKey === "google" && field === "Google Merchant Center") {
-      return assets.google.merchantCenters;
+      return cachedGoogleAssets.merchantCenters;
     }
 
     return [];
@@ -1779,11 +3246,6 @@ export default function ConfigurationPage() {
                 })}
               </div>
             ))}
-            {["TikTok", "Pinterest", "Microsoft Ads", "Snapchat", "LinkedIn"].map((platform) => (
-              <div key={platform} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 10 }}>
-                <strong>{platform}</strong> — Not currently supported
-              </div>
-            ))}
           </div>
 
           <p style={{ margin: 0, color: "#4b5563" }}>GA4 debug events appear in DebugView. They may still enter reporting unless developer traffic is filtered or a separate test property is used.</p>
@@ -1924,7 +3386,11 @@ export default function ConfigurationPage() {
         </p>
 
         <div style={styles.grid}>
-          {platformConfigs.map((platform) => {
+          {platformConfigs
+            .filter((platform) =>
+              ["google", "meta"].includes(platform.key)
+            )
+            .map((platform) => {
             const connection = connections[platform.key as keyof typeof connections];
             const isConnected = connection?.connected;
             const returnPath =
@@ -1983,6 +3449,7 @@ export default function ConfigurationPage() {
                   </p>
                 )}
 
+
                 <p style={styles.description}>{platform.description}</p>
 
                 {!isConnected && (
@@ -2004,7 +3471,7 @@ export default function ConfigurationPage() {
                       }}
                     >
                       <div style={{ display: "grid", gap: 6 }}>
-                        <strong>Business Portfolio</strong>
+                        <FieldLabel text="Business Portfolio" info={FIELD_HELP["Meta Business Portfolio"]} />
                         <span style={{ color: "#6b7280", fontSize: 13 }}>
                           Select the Meta Business Portfolio that owns the Dataset / Pixel.
                         </span>
@@ -2052,7 +3519,7 @@ export default function ConfigurationPage() {
                       </div>
 
                       <div style={{ display: "grid", gap: 6 }}>
-                        <strong>Dataset / Pixel</strong>
+                        <FieldLabel text="Dataset / Pixel" info={FIELD_HELP["Dataset / Pixel"]} />
                         <span style={{ color: "#6b7280", fontSize: 13 }}>
                           Configure Dataset / Pixel, Test Event Code, selected events, client-side Pixel, and server-side CAPI.
                         </span>
@@ -2071,32 +3538,39 @@ export default function ConfigurationPage() {
                             type="button"
                             style={styles.disabledButton}
                             disabled
-                            title="Select Meta Business Portfolio first."
+                            title="Select and save a Meta Business Portfolio first."
                           >
                             Select Business Portfolio First
                           </button>
-                        ) : metaDatasetOptions.length > 0 ? (
-                          <button
-                            type="button"
-                            style={styles.inlineActionButton}
-                            onClick={() => setActiveModal("metaDataset")}
-                          >
-                            Configure Dataset / Pixel
-                          </button>
                         ) : (
-                          <div
-                            style={{
-                              padding: "10px 12px",
-                              border: "1px solid #fde68a",
-                              borderRadius: 10,
-                              background: "#fffbeb",
-                              color: "#92400e",
-                              fontWeight: 700,
-                              lineHeight: 1.6,
-                            }}
-                          >
-                            No Dataset / Pixel loaded for the selected Business Portfolio. Make sure the connected Meta user has access to the Dataset / Pixel.
-                          </div>
+                          <>
+                            <button
+                              type="button"
+                              style={styles.inlineActionButton}
+                              onClick={() =>
+                                setActiveModal(
+                                  "metaDataset"
+                                )
+                              }
+                            >
+                              Configure Dataset / Pixel
+                            </button>
+
+                            {metaDatasetOptions.length === 0 ? (
+                              <small
+                                style={{
+                                  color: "#92400e",
+                                  fontWeight: 700,
+                                  lineHeight: 1.5,
+                                }}
+                              >
+                                No Dataset / Pixel is currently
+                                loaded. Open the configuration
+                                after saving the Business Portfolio
+                                to refresh available Meta assets.
+                              </small>
+                            ) : null}
+                          </>
                         )}
                       </div>
 
@@ -2167,21 +3641,36 @@ export default function ConfigurationPage() {
                                 discoveredProperties: options,
                                 locked: isLocked,
                               })
-                            : selectedValue && !options.some((option) => option.value === selectedValue)
-                            ? [
-                                {
-                                  value: selectedValue,
-                                  label: selectedValue,
-                                },
-                                ...options,
-                              ]
-                            : options;
+                            : platform.key === "google" &&
+                                field ===
+                                  "Google Ads Account / Manager Account"
+                              ? options
+                              : selectedValue &&
+                                  !options.some(
+                                    (option) =>
+                                      option.value ===
+                                      selectedValue
+                                  )
+                                ? [
+                                    {
+                                      value: selectedValue,
+                                      label: selectedValue,
+                                    },
+                                    ...options,
+                                  ]
+                                : options;
 
                         return (
                           <div key={field} style={styles.fieldWithAction}>
                             <div
                               style={{
-                                display: "grid",
+                                display:
+                                  isSelectionActivatedGoogleField(
+                                    platform.key,
+                                    field
+                                  )
+                                    ? "none"
+                                    : "grid",
                                 gap: 8,
                                 padding: "10px 12px",
                                 border: "1px solid #e5e7eb",
@@ -2204,6 +3693,12 @@ export default function ConfigurationPage() {
                                 <input
                                   type="checkbox"
                                   checked={isEnabled}
+                                  disabled={
+                                    platform.key === "google" &&
+                                    field ===
+                                      "Google Ads Account / Manager Account" &&
+                                    !selectedValue
+                                  }
                                   onChange={(event) => {
                                     const checked =
                                       event.currentTarget.checked;
@@ -2222,6 +3717,16 @@ export default function ConfigurationPage() {
                                       return;
                                     }
 
+                                    if (
+                                      platform.key === "google" &&
+                                      field ===
+                                        "Google Ads Account / Manager Account" &&
+                                      checked &&
+                                      !selectedValue
+                                    ) {
+                                      return;
+                                    }
+
                                     saveSetting(
                                       platform.key,
                                       `${field}:enabled`,
@@ -2230,7 +3735,13 @@ export default function ConfigurationPage() {
                                     );
                                   }}
                                 />
-                                {getFeatureLabel(field)}
+                                <FieldLabel
+                                  text={getFeatureLabel(field)}
+                                  info={getFieldHelp(
+                                    platform.key,
+                                    field
+                                  )}
+                                />
                               </label>
 
                               <small style={{ color: "#6b7280", lineHeight: 1.5 }}>
@@ -2239,7 +3750,13 @@ export default function ConfigurationPage() {
 
                             {field !== "Google Ads Remarketing" && (
                               <label style={{ ...styles.label, width: "100%", boxSizing: "border-box", gridColumn: "1 / 2" }}>
-                              {field}
+                              <FieldLabel
+                                text={field}
+                                info={getFieldHelp(
+                                  platform.key,
+                                  field
+                                )}
+                              />
                               <select
                                 value={selectedValue}
                                 disabled={isDisabled}
@@ -2259,13 +3776,33 @@ export default function ConfigurationPage() {
                                   }));
 
                                   if (nextValue) {
+                                    const selectedOption =
+                                      displayOptions.find(
+                                        (option) =>
+                                          option.value ===
+                                          nextValue
+                                      ) as AssetOption | undefined;
+
+                                    const loginCustomerId =
+                                      platform.key === "google" &&
+                                      field ===
+                                        "Google Ads Account / Manager Account"
+                                        ? selectedOption?.loginCustomerId || ""
+                                        : "";
+
                                     assetSelectionFetcher.submit(
                                       {
-                                        _action: "save_asset_selection",
-                                        platform: platform.key,
-                                        assetType: field,
-                                        assetValue: nextValue,
-                                        assetLabel: selectedLabel,
+                                        _action:
+                                          "save_asset_selection",
+                                        platform:
+                                          platform.key,
+                                        assetType:
+                                          field,
+                                        assetValue:
+                                          nextValue,
+                                        assetLabel:
+                                          selectedLabel,
+                                        loginCustomerId,
                                       },
                                       { method: "post" }
                                     );
@@ -2275,8 +3812,13 @@ export default function ConfigurationPage() {
                                       field
                                     );
 
-                                    if (platform.key === "google" && field === "GA4 Property") {
-                                      setTimeout(() => window.location.reload(), 700);
+                                    if (
+                                      platform.key === "google" &&
+                                      field === "GA4 Property"
+                                    ) {
+                                      setTimeout(() => {
+                                        revalidator.revalidate();
+                                      }, 700);
                                     }
                                   }
                                 }}
@@ -2306,11 +3848,15 @@ export default function ConfigurationPage() {
                                 ))}
                               </select>
 
-                              {!isEnabled && (
-                                <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                                  Tracking is disabled. You may select the asset now and enable tracking when ready.
-                                </small>
-                              )}
+                              {!isEnabled &&
+                                !isSelectionActivatedGoogleField(
+                                  platform.key,
+                                  field
+                                ) && (
+                                  <small style={{ color: "#6b7280", fontWeight: 500 }}>
+                                    Tracking is disabled. You may select the asset now and enable tracking when ready.
+                                  </small>
+                                )}
 
                               {isEnabled && isLocked && (
                                 <small style={{ color: "#6b7280", fontWeight: 500 }}>
@@ -2328,6 +3874,7 @@ export default function ConfigurationPage() {
                                 </small>
                               )}
                               <button
+                                hidden={!selectedValue}
                                 type="button"
                                 style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
                                 disabled={!isEnabled || !selectedValue}
@@ -2338,8 +3885,33 @@ export default function ConfigurationPage() {
                               </>
                             )}
 
+                            {platform.key === "google" &&
+                              field ===
+                                "Google Ads Account / Manager Account" &&
+                              connection &&
+                              shouldLoadGoogleAssets &&
+                              googleAdsAssetMessage ? (
+                                <div
+                                  style={{
+                                    marginTop: 6,
+                                    padding: "8px 10px",
+                                    borderRadius: 8,
+                                    border:
+                                      "1px solid #fbbf24",
+                                    background:
+                                      "#fffbeb",
+                                    color: "#92400e",
+                                    fontSize: 12,
+                                    lineHeight: 1.45,
+                                  }}
+                                >
+                                  {googleAdsAssetMessage}
+                                </div>
+                              ) : null}
+
                             {platform.key === "google" && field === "Google Ads Account / Manager Account" && (
                               <button
+                                hidden={!selectedValue}
                                 type="button"
                                 style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
                                 disabled={!isEnabled || !selectedValue}
@@ -2354,6 +3926,7 @@ export default function ConfigurationPage() {
 
                             {platform.key === "google" && field === "Google Merchant Center" && (
                               <button
+                                hidden={!selectedValue}
                                 type="button"
                                 style={isEnabled && selectedValue ? styles.inlineActionButton : styles.disabledButton}
                                 disabled={!isEnabled || !selectedValue}
@@ -2363,7 +3936,8 @@ export default function ConfigurationPage() {
                               </button>
                             )}
                             {platform.key === "google" &&
-                              field === "Google Ads Remarketing" && (
+                              field === "Google Ads Remarketing" &&
+                                isEnabled && (
                                 <button
                                   type="button"
                                   style={
@@ -2494,7 +4068,10 @@ export default function ConfigurationPage() {
             </p>
 
             <label style={styles.label}>
-              Dataset / Pixel
+              <FieldLabel
+                text="Dataset / Pixel"
+                info={FIELD_HELP["Dataset / Pixel"]}
+              />
               <select
                 style={
                   metaDatasetLocked
@@ -2532,43 +4109,130 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Meta Test Event Code
+              <FieldLabel
+                text="Meta Test Event Code"
+                info={FIELD_HELP["Meta Test Event Code"]}
+              />
               <input
                 style={styles.input}
                 value={metaTestEventCode}
-                placeholder="Optional test event code from Meta Events Manager"
+                placeholder="Optional test code from Meta Events Manager"
                 onChange={(event) => {
-                  const nextCode = event.currentTarget.value;
+                  const nextCode =
+                    event.currentTarget.value;
 
-                  setSelectedAssets((previous) => ({
-                    ...previous,
-                    ["meta:Meta Test Event Code"]: nextCode,
-                  }));
+                  setSelectedAssets(
+                    (previous) => ({
+                      ...previous,
+
+                      ["meta:Meta Test Event Code"]:
+                        nextCode,
+                    })
+                  );
                 }}
               />
-              <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                {selectedAssets["meta:Meta Test Event Code"] === "__configured__" ? "Test code configured. Enter a new value only to replace it." : "Use this only for testing CAPI events in Meta Events Manager later."}
+
+              <small
+                style={{
+                  color: "#6b7280",
+                  fontWeight: 500,
+                }}
+              >
+                {metaTestEventCode
+                  ? "The saved Test Event Code is shown above. Edit it or clear it and click Save to remove it."
+                  : "Optional. Add a code from Meta Events Manager when testing supported CAPI events."}
               </small>
             </label>
 
             <label style={styles.label}>
-              Meta CAPI Access Token
+              <FieldLabel
+                text="Meta CAPI Access Token"
+                info={FIELD_HELP["Meta CAPI Access Token"]}
+              />
               <input
                 style={styles.input}
-                type="password"
-                value={metaCapiAccessTokenInput}
-                placeholder={metaCapiAccessTokenSaved ? "Token saved. Leave blank to keep current token." : "Paste Meta CAPI access token"}
+
+                /*
+                 * Display saved MASKED preview as normal text.
+                 * A newly entered replacement token is hidden.
+                 */
+                type={
+                  savedMetaCapiAccessTokenPreview &&
+                  metaCapiAccessTokenInput ===
+                    savedMetaCapiAccessTokenPreview
+                    ? "text"
+                    : "password"
+                }
+
+                value={
+                  metaCapiAccessTokenInput
+                }
+
+                autoComplete="off"
+                spellCheck={false}
+
+                placeholder="Paste Meta CAPI access token"
+
                 onChange={(event) => {
-                  setMetaCapiAccessTokenInput(event.currentTarget.value);
+                  const nextToken =
+                    event.currentTarget.value;
+
+                  setMetaCapiAccessTokenInput(
+                    nextToken
+                  );
+
+                  /*
+                   * Removing the token also disables
+                   * Server-side Meta CAPI.
+                   */
+                  if (
+                    !nextToken.trim()
+                  ) {
+                    setSelectedAssets(
+                      (previous) => ({
+                        ...previous,
+
+                        ["meta:Meta Server Side Enabled"]:
+                          "false",
+                      })
+                    );
+                  }
                 }}
               />
-              <small style={{ color: metaCapiAccessTokenSaved ? "#166534" : "#b45309", fontWeight: 700 }}>
-                {metaCapiAccessTokenLabel}. Server-side CAPI will not work without a valid access token.
+
+              <small
+                style={{
+                  color:
+                    metaCapiAccessTokenInput ===
+                      savedMetaCapiAccessTokenPreview &&
+                    savedMetaCapiAccessTokenPreview
+                      ? "#166534"
+                      : !metaCapiAccessTokenInput
+                        ? "#b45309"
+                        : "#6b7280",
+
+                  fontWeight: 600,
+                }}
+              >
+                {savedMetaCapiAccessTokenPreview &&
+                metaCapiAccessTokenInput ===
+                  savedMetaCapiAccessTokenPreview
+                  ? "Saved token preview. The first and last 6 characters are shown; the middle is hidden."
+                  : !metaCapiAccessTokenInput
+                    ? savedMetaCapiAccessTokenPreview
+                      ? "Token will be removed when you click Save. Server-side Meta CAPI will also be disabled."
+                      : "No CAPI Access Token is saved."
+                    : savedMetaCapiAccessTokenPreview
+                      ? "A new token has been entered. Click Save to replace the current token."
+                      : "Click Save to store this token securely."}
               </small>
             </label>
 
             <label style={styles.label}>
-              Content ID / Product ID Format
+              <FieldLabel
+                text="Content ID / Product ID Format"
+                info={FIELD_HELP["Content ID / Product ID Format"]}
+              />
               <select
                 style={styles.select}
                 value={metaContentIdFormat}
@@ -2593,7 +4257,7 @@ export default function ConfigurationPage() {
             </label>
 
             <div style={{ display: "grid", gap: 10 }}>
-              <strong>Delivery Options</strong>
+              <FieldLabel text="Delivery Options" info={FIELD_HELP["Meta Delivery Options"]} />
 
               <label style={styles.checkboxLabel}>
                 <input
@@ -2629,9 +4293,9 @@ export default function ConfigurationPage() {
             </div>
 
             <div style={{ display: "grid", gap: 10 }}>
-              <strong>Meta Events</strong>
+              <FieldLabel text="Meta Events" info={FIELD_HELP["Meta Events"]} />
               <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                No events are selected by default. Select only the events the merchant wants to send.
+                Choose the Meta events this Dataset / Pixel should receive. Saved event selections are shown below.
               </small>
 
               <div style={styles.checkGrid}>
@@ -2667,79 +4331,154 @@ export default function ConfigurationPage() {
               )}
             </div>
 
-            {metaDatasetResult?.ok && (
-              <div style={styles.successBox}>
-                {metaDatasetResult.message || "Meta Dataset / Pixel settings saved."}
+            {(metaDatasetResult?.ok ||
+              metaDatasetResult?.saved) &&
+              !metaDatasetIsDirty && (
+              <div
+                style={
+                  metaDatasetResult?.syncFailed
+                    ? {
+                        padding: "12px",
+                        border: "1px solid #fde68a",
+                        borderRadius: 10,
+                        background: "#fffbeb",
+                        color: "#92400e",
+                        fontWeight: 700,
+                        lineHeight: 1.5,
+                      }
+                    : styles.successBox
+                }
+              >
+                {metaDatasetResult?.syncFailed
+                  ? metaDatasetResult.warning ||
+                    "Meta settings were saved, but Web Pixel synchronization needs attention."
+                  : metaDatasetResult.message ||
+                    "Meta Dataset / Pixel settings saved successfully."}
               </div>
             )}
 
-            {metaDatasetResult?.error && (
+            {metaDatasetResult?.error &&
+            !metaDatasetResult?.saved ? (
               <div style={styles.errorBox}>
                 {metaDatasetResult.error}
               </div>
-            )}
+            ) : null}
 
             <div style={styles.modalActions}>
               <button
                 type="button"
                 style={styles.secondaryButton}
-                onClick={() => setActiveModal(null)}
+                onClick={() =>
+                  setActiveModal(null)
+                }
               >
                 Cancel
               </button>
 
               <button
                 type="button"
+
                 style={
-                  metaDatasetValue && metaDatasetFetcher.state === "idle"
+                  metaDatasetValue &&
+                  metaDatasetFetcher.state ===
+                    "idle"
                     ? styles.primaryButton
                     : styles.disabledButton
                 }
-                disabled={!metaDatasetValue || metaDatasetFetcher.state !== "idle"}
+
+                disabled={
+                  !metaDatasetValue ||
+                  metaDatasetFetcher.state !==
+                    "idle"
+                }
+
                 onClick={() => {
-                  const selectedOption = metaDatasetOptions.find(
-                    (option) => option.value === metaDatasetValue
-                  );
+                  /*
+                   * Nothing changed:
+                   * primary action becomes Close.
+                   */
+                  if (
+                    metaDatasetHasSavedConfig &&
+                    !metaDatasetIsDirty
+                  ) {
+                    setActiveModal(null);
+                    return;
+                  }
+
+                  const selectedOption =
+                    metaDatasetOptions.find(
+                      (option) =>
+                        option.value ===
+                        metaDatasetValue
+                    );
+
+                  const capiAccessTokenMode =
+                    !metaCapiAccessTokenInput.trim()
+                      ? "remove"
+                      : (
+                          savedMetaCapiAccessTokenPreview &&
+                          metaCapiAccessTokenInput ===
+                            savedMetaCapiAccessTokenPreview
+                        )
+                        ? "keep"
+                        : "replace";
 
                   metaDatasetFetcher.submit(
                     {
-                      _action: "save_meta_dataset_settings",
-                      datasetId: metaDatasetValue,
-                      datasetName: selectedOption?.label || metaDatasetValue,
-                      selectedEvents: metaSelectedEvents.length ? metaSelectedEvents.join(",") : "none",
-                      clientSideEnabled: metaClientSideEnabled ? "true" : "false",
-                      serverSideEnabled: metaServerSideEnabled ? "true" : "false",
-                      testEventCode: metaTestEventCode || "",
-                      contentIdFormat: metaContentIdFormat,
-                      capiAccessToken: metaCapiAccessTokenInput,
+                      _action:
+                        "save_meta_dataset_settings",
+
+                      datasetId:
+                        metaDatasetValue,
+
+                      datasetName:
+                        selectedOption?.label ||
+                        metaDatasetValue,
+
+                      selectedEvents:
+                        metaSelectedEvents.length
+                          ? metaSelectedEvents.join(
+                              ","
+                            )
+                          : "none",
+
+                      clientSideEnabled:
+                        metaClientSideEnabled
+                          ? "true"
+                          : "false",
+
+                      serverSideEnabled:
+                        metaServerSideEnabled
+                          ? "true"
+                          : "false",
+
+                      testEventCode:
+                        metaTestEventCode,
+
+                      contentIdFormat:
+                        metaContentIdFormat,
+
+                      capiAccessToken:
+                        metaCapiAccessTokenInput,
+
+                      capiAccessTokenMode,
                     },
-                    { method: "post" }
+                    {
+                      method:
+                        "post",
+                    }
                   );
-
-                  lockAssetField(
-                    "meta",
-                    "Meta Business Portfolio"
-                  );
-                  lockAssetField(
-                    "meta",
-                    "Meta Dataset / Pixel"
-                  );
-
-                  if (metaCapiAccessTokenInput.trim()) {
-                    setSelectedAssets((previous) => ({
-                      ...previous,
-                      ["meta:Meta CAPI Access Token"]: "__saved__",
-                    }));
-
-                    setMetaCapiAccessTokenInput("");
-                    setMetaCapiAccessTokenSavedOverride(true);
-                  }
-
                 }}
               >
-                {metaDatasetFetcher.state === "idle"
-                  ? "Save Dataset / Pixel Settings"
-                  : "Saving..."}
+                {metaDatasetFetcher.state !==
+                "idle"
+                  ? "Saving..."
+                  : !metaDatasetValue
+                    ? "Select Dataset / Pixel First"
+                    : metaDatasetHasSavedConfig &&
+                        !metaDatasetIsDirty
+                      ? "Close"
+                      : "Save"}
               </button>
             </div>
           </div>
@@ -2769,7 +4508,10 @@ export default function ConfigurationPage() {
               </div>
             ) : (
               <label style={styles.label}>
-                Business Portfolio
+                <FieldLabel
+                  text="Business Portfolio"
+                  info={FIELD_HELP["Meta Business Portfolio"]}
+                />
                 <select
                   style={
                     metaBusinessLocked
@@ -2795,6 +4537,12 @@ export default function ConfigurationPage() {
                       ...previous,
                       [metaBusinessKey]: nextBusinessId,
                     }));
+
+                    /*
+                     * The newly selected Portfolio is only a
+                     * local draft until the server confirms it.
+                     */
+                    setMetaBusinessDrafting(true);
                   }}
                 >
                   <option value="">Select Business Portfolio</option>
@@ -2807,53 +4555,131 @@ export default function ConfigurationPage() {
               </label>
             )}
 
-            <div style={styles.modalActions}>
-              <button
-                type="button"
-                style={styles.secondaryButton}
-                onClick={() => setActiveModal(null)}
+            {metaBusinessConfirmed ? (
+              <div style={styles.successBox}>
+                Meta Business Portfolio connected
+                successfully.
+              </div>
+            ) : null}
+
+            {metaBusinessResult?.warning ? (
+              <div
+                style={{
+                  padding: "12px",
+                  border: "1px solid #fde68a",
+                  borderRadius: 10,
+                  background: "#fffbeb",
+                  color: "#92400e",
+                  fontWeight: 700,
+                  lineHeight: 1.5,
+                }}
               >
-                Cancel
-              </button>
+                {metaBusinessResult.warning}
+              </div>
+            ) : null}
+
+            {metaBusinessResult?.error &&
+            !metaBusinessResult?.saved ? (
+              <div style={styles.errorBox}>
+                {metaBusinessResult.error}
+              </div>
+            ) : null}
+
+            <div style={styles.modalActions}>
+              {!metaBusinessConfirmed ? (
+                <button
+                  type="button"
+                  style={styles.secondaryButton}
+                  onClick={() => {
+                    setMetaBusinessDrafting(false);
+                    setActiveModal(null);
+
+                    /*
+                     * Discard any unsaved local Portfolio
+                     * selection by loading server state again.
+                     */
+                    revalidator.revalidate();
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : null}
 
               <button
                 type="button"
                 style={
-                  !metaBusinessLocked && metaBusinessValue
+                  metaBusinessConfirmed ||
+                  (
+                    metaBusinessValue &&
+                    metaBusinessFetcher.state ===
+                      "idle"
+                  )
                     ? styles.primaryButton
                     : styles.disabledButton
                 }
                 disabled={
-                  metaBusinessLocked || !metaBusinessValue
+                  !metaBusinessConfirmed &&
+                  (
+                    !metaBusinessValue ||
+                    metaBusinessFetcher.state !==
+                      "idle"
+                  )
                 }
                 onClick={() => {
-                  const selectedOption = metaBusinessOptions.find(
-                    (option) => option.value === metaBusinessValue
-                  );
+                  /*
+                   * A confirmed Portfolio uses Close.
+                   * Refresh Meta assets only after successful
+                   * persistence, never after a fixed timeout.
+                   */
+                  if (metaBusinessConfirmed) {
+                    window.location.href =
+                      withNav(
+                        "/app/settings?loadMetaAssets=true"
+                      );
 
-                  assetSelectionFetcher.submit(
-                    {
-                      _action: "save_asset_selection",
-                      platform: "meta",
-                      assetType: "Meta Business Portfolio",
-                      assetValue: metaBusinessValue,
-                      assetLabel: selectedOption?.label || metaBusinessValue,
-                    },
-                    { method: "post" }
-                  );
+                    return;
+                  }
 
-                  setActiveModal(null);
-
-                  setTimeout(() => {
-                    window.location.href = withNav(
-                      "/app/settings?unlockPlatform=meta&loadMetaAssets=true"
+                  const selectedOption =
+                    metaBusinessOptions.find(
+                      (option) =>
+                        option.value ===
+                        metaBusinessValue
                     );
-                  }, 700);
+
+                  setMetaBusinessDrafting(false);
+
+                  metaBusinessFetcher.submit(
+                    {
+                      _action:
+                        "save_asset_selection",
+
+                      platform:
+                        "meta",
+
+                      assetType:
+                        "Meta Business Portfolio",
+
+                      assetValue:
+                        metaBusinessValue,
+
+                      assetLabel:
+                        selectedOption?.label ||
+                        metaBusinessValue,
+                    },
+                    {
+                      method:
+                        "post",
+                    }
+                  );
                 }}
               >
-                {metaBusinessLocked
-                  ? "Business Portfolio Locked"
-                  : "Save Business Portfolio"}
+                {metaBusinessConfirmed
+                  ? "Close"
+                  : metaBusinessFetcher.state !==
+                      "idle"
+                    ? "Saving..."
+                    : "Save Business Portfolio"}
               </button>
             </div>
           </div>
@@ -2864,7 +4690,10 @@ export default function ConfigurationPage() {
         <Modal title="Google Ads Remarketing Configuration" onClose={() => setActiveModal(null)}>
           <div style={styles.modalGrid}>
             <label style={styles.label}>
-              Item ID Format
+              <FieldLabel
+                text="Item ID Format"
+                info={FIELD_HELP["Remarketing Item ID Format"]}
+              />
               <select
                 style={styles.select}
                 value={getItemIdFormat("google", "Google Ads Remarketing")}
@@ -2884,7 +4713,7 @@ export default function ConfigurationPage() {
             </label>
 
             <div style={{ display: "grid", gap: 10 }}>
-              <strong>Remarketing Events</strong>
+              <FieldLabel text="Remarketing Events" info={FIELD_HELP["Remarketing Events"]} />
 
               <div style={styles.checkGrid}>
                 {remarketingEventOptions.map((eventOption) => {
@@ -2940,7 +4769,10 @@ export default function ConfigurationPage() {
             <input type="hidden" name="propertyId" value={ga4PropertyValue} />
 
             <label style={styles.label}>
-              Selected GA4 Property
+              <FieldLabel
+                text="Selected GA4 Property"
+                info={FIELD_HELP["Selected GA4 Property"]}
+              />
               <input
                 style={styles.input}
                 value={ga4PropertyValue || "Select GA4 Property first"}
@@ -2950,7 +4782,10 @@ export default function ConfigurationPage() {
 
             {assets.google.ga4DataStreams.length > 0 ? (
               <label style={styles.label}>
-                GA4 Data Stream / Measurement ID
+                <FieldLabel
+                  text="GA4 Data Stream / Measurement ID"
+                  info={FIELD_HELP["GA4 Data Stream / Measurement ID"]}
+                />
                 <select
                   style={styles.select}
                   name="measurementId"
@@ -2966,7 +4801,10 @@ export default function ConfigurationPage() {
               </label>
             ) : (
               <label style={styles.label}>
-                GA4 Measurement ID
+                <FieldLabel
+                  text="GA4 Measurement ID"
+                  info={FIELD_HELP["GA4 Measurement ID"]}
+                />
                 <input
                   style={styles.input}
                   name="measurementId"
@@ -2977,7 +4815,10 @@ export default function ConfigurationPage() {
             )}
 
             <label style={styles.label}>
-              Delivery Mode
+              <FieldLabel
+                text="Delivery Mode"
+                info={FIELD_HELP["GA4 Delivery Mode"]}
+              />
               <select
                 style={styles.select}
                 name="deliveryMode"
@@ -2996,8 +4837,14 @@ export default function ConfigurationPage() {
                     color: getGa4ApiSecretTitleColor(ga4ApiSecretConfigured),
                   }}
                 >
-                  GA4 API Secret
-                  {ga4ApiSecretConfigured ? " · Saved" : ""}
+                  <FieldLabel
+                    text={`GA4 API Secret${
+                      ga4ApiSecretConfigured
+                        ? " · Saved"
+                        : ""
+                    }`}
+                    info={FIELD_HELP["GA4 API Secret"]}
+                  />
                 </span>
                 <input
                   style={styles.input}
@@ -3025,7 +4872,10 @@ export default function ConfigurationPage() {
             )}
 
             <label style={styles.label}>
-              GA4 Item ID Format
+              <FieldLabel
+                text="GA4 Item ID Format"
+                info={FIELD_HELP["GA4 Item ID Format"]}
+              />
               <select
                 style={styles.select}
                 value={getItemIdFormat("google", "GA4 Property")}
@@ -3045,7 +4895,7 @@ export default function ConfigurationPage() {
             </label>
 
             <div style={{ display: "grid", gap: 10 }}>
-              <strong>GA4 Events to Send</strong>
+              <FieldLabel text="GA4 Events to Send" info={FIELD_HELP["GA4 Events to Send"]} />
 
               <div style={styles.checkGrid}>
                 {ga4EventOptions.map((eventOption) => {
@@ -3116,9 +4966,17 @@ export default function ConfigurationPage() {
             <input type="hidden" name="_action" value="save_google_conversions" />
             <input type="hidden" name="setupType" value="custom" />
             <input type="hidden" name="conversionActionRecordId" value={googleConversionForm.recordId} />
+            <input
+              type="hidden"
+              name="googleAdsLoginCustomerId"
+              value={googleAdsLoginCustomerId}
+            />
 
             <label style={styles.label}>
-              Selected Google Ads Account
+              <FieldLabel
+                text="Selected Google Ads Account"
+                info={FIELD_HELP["Selected Google Ads Account"]}
+              />
               <input
                 style={styles.input}
                 name="googleAdsCustomerId"
@@ -3128,7 +4986,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Conversion Event
+              <FieldLabel
+                text="Conversion Event"
+                info={FIELD_HELP["Conversion Event"]}
+              />
               <select
                 style={styles.select}
                 name="eventName"
@@ -3147,26 +5008,32 @@ export default function ConfigurationPage() {
                 <option value="SUBSCRIBE">Subscribe</option>
               </select>
               <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                You can create multiple conversions for the same event by using different conversion names.
+                Select the Shopify event for this Google Ads conversion. You can create multiple conversions for the same event by using different custom names.
               </small>
             </label>
 
             <label style={styles.label}>
-              Conversion Name
+              <FieldLabel
+                text="Conversion Name"
+                info={FIELD_HELP["Conversion Name"]}
+              />
               <input
                 style={styles.input}
                 name="conversionName"
-                placeholder="Example: DH Purchase - Primary"
+                placeholder="Optional custom name"
                 value={googleConversionForm.conversionName}
                 onChange={(event) => updateGoogleConversionForm("conversionName", event.currentTarget.value)}
               />
               <small style={{ color: "#6b7280", fontWeight: 500 }}>
-                This name will be used in Google Ads. Example: DH Purchase - Primary, DH Purchase - Secondary.
+                Enter a custom name to use it exactly in Google Ads. Leave blank to use the default name for the selected event, such as DH - Page View or DH - Purchase.
               </small>
             </label>
 
             <label style={styles.label}>
-              Goal Role
+              <FieldLabel
+                text="Goal Role"
+                info={FIELD_HELP["Goal Role"]}
+              />
               <select
                 style={styles.select}
                 name="isPrimary"
@@ -3179,7 +5046,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Conversion Value
+              <FieldLabel
+                text="Conversion Value"
+                info={FIELD_HELP["Conversion Value"]}
+              />
               <select
                 style={styles.select}
                 name="conversionValueMode"
@@ -3193,7 +5063,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Google Ads Item ID Format
+              <FieldLabel
+                text="Google Ads Item ID Format"
+                info={FIELD_HELP["Google Ads Item ID Format"]}
+              />
               <select
                 style={styles.select}
                 value={getItemIdFormat("google", "Google Ads Account / Manager Account")}
@@ -3217,16 +5090,56 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Google Ads Delivery Mode
+              <FieldLabel
+                text="Google Ads Delivery Mode"
+                info={FIELD_HELP["Google Ads Delivery Mode"]}
+              />
               <select
                 style={styles.select}
                 name="deliveryMode"
-                value={googleConversionForm.deliveryMode}
-                onChange={(event) => updateGoogleConversionForm("deliveryMode", event.currentTarget.value)}
+                value={
+                  googleConversionForm.eventName !==
+                    "PURCHASE" &&
+                  googleConversionForm.deliveryMode ===
+                    "server"
+                    ? "client"
+                    : googleConversionForm.deliveryMode
+                }
+                onChange={(event) =>
+                  updateGoogleConversionForm(
+                    "deliveryMode",
+                    event.currentTarget.value
+                  )
+                }
               >
-                <option value="client">Client-side only</option>
-                <option value="server">Server-side only</option>
+                <option value="client">
+                  Client-side only
+                </option>
+                <option
+                  value="server"
+                  disabled={
+                    googleConversionForm.eventName !==
+                    "PURCHASE"
+                  }
+                >
+                  Server-side only — Purchase
+                </option>
               </select>
+
+              {googleConversionForm.eventName &&
+                googleConversionForm.eventName !==
+                  "PURCHASE" && (
+                  <small
+                    style={{
+                      color: "#6b7280",
+                      fontWeight: 500,
+                    }}
+                  >
+                    Server-side Google Ads delivery currently
+                    supports Purchase only. Other conversion
+                    events use client-side delivery.
+                  </small>
+                )}
             </label>
 
             {googleConversionForm.recordId && (
@@ -3243,7 +5156,20 @@ export default function ConfigurationPage() {
 
             {conversionResult?.error && (
               <div style={styles.errorBox}>
-                {conversionResult.error}
+                <div>{conversionResult.error}</div>
+
+                {conversionResult.details ? (
+                  <div
+                    style={{
+                      marginTop: 8,
+                      fontSize: 12,
+                      whiteSpace: "pre-wrap",
+                    }}
+                  >
+                    Google API details:{" "}
+                    {conversionResult.details}
+                  </div>
+                ) : null}
               </div>
             )}
 
@@ -3373,7 +5299,10 @@ export default function ConfigurationPage() {
             <input type="hidden" name="uploadRunId" value={String(Date.now())} />
 
             <label style={styles.label}>
-              Selected Merchant Center
+              <FieldLabel
+                text="Selected Merchant Center"
+                info={FIELD_HELP["Selected Merchant Center"]}
+              />
               <input
                 style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}
                 value={merchantCenterValue}
@@ -3382,36 +5311,88 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Target Country
-              <select name="targetCountry" defaultValue="US" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
-                <option value="US">United States - US</option>
-                <option value="CA">Canada - CA</option>
-                <option value="GB">United Kingdom - GB</option>
-                <option value="AU">Australia - AU</option>
-                <option value="BD">Bangladesh - BD</option>
-                {merchantCountryCodes
-                  .filter((code) => !["US", "CA", "GB", "AU", "BD"].includes(code))
-                  .map((code) => (
-                    <option key={code} value={code}>
-                      {code}
+              <FieldLabel
+                text="Target Country"
+                info={FIELD_HELP["Target Country"]}
+              />
+
+              <select
+                name="targetCountry"
+                value={feedTargetCountry}
+                onChange={(event) => {
+                  const nextCountry =
+                    event.currentTarget.value;
+
+                  setFeedTargetCountry(nextCountry);
+
+                  if (nextCountry !== "CUSTOM") {
+                    setFeedCustomTargetCountry("");
+                  }
+                }}
+                style={{
+                  ...styles.input,
+                  width: "100%",
+                  boxSizing: "border-box",
+                }}
+              >
+                {merchantCountryOptions.map(
+                  (country) => (
+                    <option
+                      key={country.code}
+                      value={country.code}
+                    >
+                      {country.name} - {country.code}
                     </option>
-                  ))}
-                <option value="CUSTOM">Custom country code</option>
+                  )
+                )}
+
+                <option value="CUSTOM">
+                  Custom country code
+                </option>
               </select>
             </label>
 
-            <label style={styles.label}>
-              Custom Target Country Code
-              <input
-                name="customTargetCountry"
-                style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}
-                placeholder="Only used when Target Country is CUSTOM. Example: ZZ"
-                maxLength={2}
-              />
-            </label>
+            {feedTargetCountry === "CUSTOM" ? (
+              <label style={styles.label}>
+                <FieldLabel
+                  text="Custom Target Country Code"
+                  info={
+                    FIELD_HELP[
+                      "Custom Target Country Code"
+                    ]
+                  }
+                />
+
+                <input
+                  name="customTargetCountry"
+                  value={feedCustomTargetCountry}
+                  onChange={(event) =>
+                    setFeedCustomTargetCountry(
+                      event.currentTarget.value
+                        .replace(/[^A-Za-z]/g, "")
+                        .slice(0, 2)
+                        .toUpperCase()
+                    )
+                  }
+                  required
+                  maxLength={2}
+                  pattern="[A-Za-z]{2}"
+                  placeholder="Example: ZZ"
+                  style={{
+                    ...styles.input,
+                    width: "100%",
+                    boxSizing: "border-box",
+                    textTransform: "uppercase",
+                  }}
+                />
+              </label>
+            ) : null}
 
             <label style={styles.label}>
-              Product ID Format
+              <FieldLabel
+                text="Product ID Format"
+                info={FIELD_HELP["Product ID Format"]}
+              />
               <select
                 name="productIdFormat"
                 defaultValue="shopify_country_product_variant"
@@ -3426,7 +5407,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Product Channel
+              <FieldLabel
+                text="Product Channel"
+                info={FIELD_HELP["Product Channel"]}
+              />
               <select name="channel" defaultValue="online" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
                 <option value="online">Online products</option>
                 <option value="local">Local products later / advanced</option>
@@ -3434,7 +5418,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Marketing Methods
+              <FieldLabel
+                text="Marketing Methods"
+                info={FIELD_HELP["Marketing Methods"]}
+              />
               <select name="marketingMethod" defaultValue="all" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
                 <option value="all">Free listings and Shopping ads</option>
                 <option value="free_listings">Free listings only</option>
@@ -3443,7 +5430,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Feed Update Schedule
+              <FieldLabel
+                text="Feed Update Schedule"
+                info={FIELD_HELP["Feed Update Schedule"]}
+              />
               <select name="scheduleInterval" defaultValue="manual" style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
                 <option value="manual">Manual upload only</option>
                 <option value="hourly">Hourly</option>
@@ -3455,7 +5445,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Feed Creation Method
+              <FieldLabel
+                text="Feed Creation Method"
+                info={FIELD_HELP["Feed Creation Method"]}
+              />
               <select style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
                 <option value="all">All active in-stock Shopify products</option>
                 <option value="category">Create feed by category/collection later</option>
@@ -3464,7 +5457,10 @@ export default function ConfigurationPage() {
             </label>
 
             <label style={styles.label}>
-              Category / Collection
+              <FieldLabel
+                text="Category / Collection"
+                info={FIELD_HELP["Category / Collection"]}
+              />
               <select style={{ ...styles.input, width: "100%", boxSizing: "border-box" }}>
                 <option>Select category or collection</option>
                 <option>Collection loading API pending</option>
@@ -3484,7 +5480,10 @@ export default function ConfigurationPage() {
             <div style={{ marginTop: 12, padding: 12, border: "1px solid #fde68a", borderRadius: 10, background: "#fffbeb" }}>
               <label style={{ display: "flex", gap: 8, alignItems: "flex-start", fontWeight: 700 }}>
                 <input name="includeRestrictedProducts" type="checkbox" value="true" />
-                Include restricted/adult products if detected
+                <FieldLabel
+                  text="Include restricted/adult products if detected"
+                  info={FIELD_HELP["Restricted Products"]}
+                />
               </label>
               <p style={{ margin: "6px 0 0", color: "#92400e", fontSize: 13 }}>
                 Default: unchecked. Restricted/adult items are skipped unless this is checked.
@@ -3607,7 +5606,124 @@ function Modal({
   );
 }
 
+
+function FieldLabel({
+  text,
+  info,
+}: {
+  text: string;
+  info: string;
+}) {
+  return (
+    <span style={styles.labelTitle}>
+      <span>{text}</span>
+      <InfoTip text={info} />
+    </span>
+  );
+}
+
+function InfoTip({
+  text,
+}: {
+  text: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <span
+      style={styles.infoWrap}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <button
+        type="button"
+        style={styles.infoButton}
+        aria-label="Field information"
+        aria-expanded={open}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+      >
+        i
+      </button>
+
+      {open ? (
+        <span
+          role="tooltip"
+          style={styles.infoTooltip}
+        >
+          {text}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
 const styles: Record<string, CSSProperties> = {
+  labelTitle: {
+    display: "inline-flex",
+    alignItems: "center",
+    gap: 4,
+    flexWrap: "wrap",
+    minWidth: 0,
+  },
+
+  infoWrap: {
+    position: "relative",
+    display: "inline-flex",
+    alignItems: "center",
+    flexShrink: 0,
+    zIndex: 25,
+  },
+
+  infoButton: {
+    width: 15,
+    height: 15,
+    minWidth: 15,
+    padding: 0,
+    display: "inline-grid",
+    placeItems: "center",
+    boxSizing: "border-box",
+    borderRadius: "50%",
+    border: "1px solid #15803d",
+    outline: "none",
+    backgroundColor: "transparent",
+    color: "#15803d",
+    fontSize: 12,
+    lineHeight: 1,
+    fontWeight: 400,
+    fontStyle: "normal",
+    fontFamily: "Arial, sans-serif",
+    cursor: "help",
+    position: "relative",
+    top: -5,
+  },
+
+  infoTooltip: {
+    position: "absolute",
+    zIndex: 30000,
+    left: 18,
+    top: -10,
+    width: "min(320px, calc(100vw - 80px))",
+    maxWidth: 320,
+    padding: "10px 12px",
+    borderRadius: 9,
+    border: "1px solid #86efac",
+    backgroundColor: "#052e16",
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: 500,
+    lineHeight: 1.55,
+    boxShadow:
+      "0 10px 30px rgba(15,23,42,.24)",
+    whiteSpace: "normal",
+    pointerEvents: "none",
+  },
+
   page: { padding: 24, maxWidth: 1280, margin: "0 auto" },
   hero: {
     padding: 24,
@@ -3826,10 +5942,11 @@ const styles: Record<string, CSSProperties> = {
   },
   fieldWithAction: {
     display: "grid",
-    gridTemplateColumns: "minmax(0, 1fr) auto",
-    alignItems: "end",
+    gridTemplateColumns: "minmax(0, 1fr)",
+    alignItems: "stretch",
     gap: 10,
     width: "100%",
+    minWidth: 0,
   },
   connectedBadge: {
     display: "inline-block",

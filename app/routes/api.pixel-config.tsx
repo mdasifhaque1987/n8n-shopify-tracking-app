@@ -42,6 +42,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
   let ga4DeliveryMode = "client";
   let ga4ClientSideEnabled = Boolean(ga4MeasurementId);
   let ga4ServerSideEnabled = false;
+  let ga4SelectedEvents: string[] = [];
   let testModeEnabled = false;
   let ga4ClientTestMode = false;
   let metaPixelTestMode = false;
@@ -87,6 +88,18 @@ export async function loader({ request }: LoaderFunctionArgs) {
     }
 
     const selectedAssets = await getAssetSelections(settings.workspaceId);
+
+    const ga4SelectedEventsRaw = String(
+      selectedAssets["google:GA4 Property:events"] || ""
+    ).trim();
+
+    ga4SelectedEvents =
+      !ga4SelectedEventsRaw || ga4SelectedEventsRaw === "none"
+        ? []
+        : ga4SelectedEventsRaw
+            .split(",")
+            .map((eventName) => eventName.trim())
+            .filter(Boolean);
 
     const metaDatasetId = String(
       selectedAssets["meta:Meta Dataset / Pixel"] || ""
@@ -254,6 +267,7 @@ export async function loader({ request }: LoaderFunctionArgs) {
         deliveryMode: ga4DeliveryMode,
         clientSideEnabled: ga4ClientSideEnabled,
         serverSideEnabled: ga4ServerSideEnabled,
+        selectedEvents: ga4SelectedEvents,
         testMode: ga4ClientTestMode,
       },
       googleAds: {

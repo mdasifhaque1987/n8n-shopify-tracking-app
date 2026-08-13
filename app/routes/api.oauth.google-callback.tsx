@@ -205,13 +205,72 @@ export async function loader({ request }: LoaderFunctionArgs) {
       data: { isActive: false },
     });
 
+    /*
+     * Google reconnect refreshes OAuth credentials only.
+     *
+     * Do NOT delete previously selected GA4, Google Ads,
+     * Merchant Center, conversion, delivery, or server-side
+     * configuration here.
+     *
+     * API discovery can temporarily fail because of quotas,
+     * permissions, or Google service availability. OAuth
+     * reauthentication must never destroy a valid merchant
+     * configuration.
+     */
+
     await db.oAuthState.delete({ where: { state } });
+
+    /*
+     * Every successful Google Connect/Reconnect gets one
+     * explicit discovery request.
+     *
+     * The settings loader will:
+     *   - start from the previous successful cache
+     *   - refresh Google Ads once
+     *   - refresh Merchant Center
+     *   - refresh GA4
+     *   - preserve cache when an API temporarily fails
+     *
+     * Ordinary settings-page reloads do not contain
+     * loadGoogleAssets=true and therefore do not call the
+     * Google discovery APIs.
+     */
+    const googleReturnUrl = (() => {
+      try {
+        const nextUrl =
+          new URL(
+            returnUrl,
+            new URL(request.url).origin
+          );
+
+        nextUrl.searchParams.set(
+          "unlockPlatform",
+          "google"
+        );
+
+        nextUrl.searchParams.set(
+          "loadGoogleAssets",
+          "true"
+        );
+
+        const isAbsolute =
+          /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//.test(
+            returnUrl
+          );
+
+        return isAbsolute
+          ? nextUrl.toString()
+          : `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`;
+      } catch {
+        return returnUrl;
+      }
+    })();
 
     return htmlPage(
       "Google connected",
       "Google account connected successfully.",
       "success",
-      returnUrl
+      googleReturnUrl
     );
   } catch (error) {
     console.error("Google OAuth callback failed", {

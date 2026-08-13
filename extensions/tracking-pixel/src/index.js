@@ -17,7 +17,7 @@ const DH_ITEM_METADATA_MAX_ENTRIES = 200;
 const DH_PURCHASE_EVENT_ID_STORAGE_PREFIX =
   "dh_purchase_event_id_v1:";
 const DH_PIXEL_VERSION =
-  "2026-07-25-stape-style-event-id-v8";
+  "2026-08-10-meta-browser-cors-v9";
 const DH_PIXEL_DEBUG = false;
 
 let cachedConfig = null;
@@ -59,6 +59,9 @@ function configFromPixelSettings(settings) {
       clientSideEnabled: settings.ga4_enabled === "true",
       deliveryMode: "client",
       measurementId: settings.ga4_measurement_id || null,
+      selectedEvents: Array.isArray(clientEvents.ga4Events)
+        ? clientEvents.ga4Events
+        : [],
       testMode: Boolean(ga4Test && ga4Test.enabled),
     },
     meta: {
@@ -1939,13 +1942,31 @@ function mapGoogleAdsEventName(payload) {
     view_item: "VIEW_ITEM",
     view_item_list: "VIEW_ITEM_LIST",
     add_to_cart: "ADD_TO_CART",
+    remove_from_cart: "REMOVE_FROM_CART",
+    view_cart: "VIEW_CART",
     begin_checkout: "BEGIN_CHECKOUT",
+    add_contact_info: "ADD_CONTACT_INFO",
+    add_shipping_info: "ADD_SHIPPING_INFO",
+    add_payment_info: "ADD_PAYMENT_INFO",
     purchase: "PURCHASE",
+    search: "SEARCH",
     generate_lead: "LEAD",
     sign_up: "SUBSCRIBE",
   };
 
-  return map[payload.ga4_event] || map[payload.original_event] || String(payload.ga4_event || "").toUpperCase();
+  const ga4Event = String(
+    payload.ga4_event || ""
+  ).trim();
+
+  const originalEvent = String(
+    payload.original_event || ""
+  ).trim();
+
+  return (
+    map[ga4Event] ||
+    map[originalEvent] ||
+    ga4Event.toUpperCase()
+  );
 }
 
 
@@ -2159,8 +2180,13 @@ function sendGoogleAdsRemarketing(payload, config) {
       ? remarketingConfig.events
       : [];
 
-    if (allowedEvents.length && allowedEvents.indexOf(eventName) === -1) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Google Ads remarketing skipped - event not selected", eventName);
+    if (allowedEvents.indexOf(eventName) === -1) {
+      DH_PIXEL_DEBUG &&
+        console.log(
+          "[DH Tracking Pixel] Google Ads remarketing skipped - event not selected",
+          eventName,
+          allowedEvents
+        );
       return;
     }
 
@@ -2314,6 +2340,29 @@ function sendToGa4(payload, config) {
           deliveryMode:
             config?.ga4?.deliveryMode,
           enabled: config?.ga4?.enabled,
+        }
+      );
+
+      return null;
+    }
+
+    const selectedEvents =
+      Array.isArray(config?.ga4?.selectedEvents)
+        ? config.ga4.selectedEvents
+        : [];
+
+    const ga4EventName = String(
+      payload.ga4_event ||
+      payload.original_event ||
+      ""
+    ).trim();
+
+    if (!selectedEvents.includes(ga4EventName)) {
+      DH_PIXEL_DEBUG && console.log(
+        "[DH Tracking Pixel] GA4 skipped - event not selected",
+        {
+          eventName: ga4EventName,
+          selectedEvents,
         }
       );
 
@@ -2479,6 +2528,7 @@ function buildMetaPixelUrl(payload, metaConfig) {
   params.set("if", "false");
   params.set("ts", String(Math.floor(Date.now() / 1000)));
   params.set("eid", payload.event_id);
+  params.set("noscript", "1");
 
   if (payload.attribution && payload.attribution.fbp) {
     params.set("fbp", payload.attribution.fbp);
@@ -2610,37 +2660,99 @@ async function shouldSkipMetaSemanticEvent(payload, browser) {
   }
 }
 
-function sendToMetaPixel(payload, config) {
+async function sendToMetaPixel(payload, config) {
+  var metaConfig = getMetaConfig(config);
+  var pixelId =
+    metaConfig.pixelId ||
+    metaConfig.datasetId;
+
   try {
-    var metaConfig = getMetaConfig(config);
-    var pixelId = metaConfig.pixelId || metaConfig.datasetId;
+    if (
+      payload.meta &&
+      payload.meta.skip === true
+    ) {
+      DH_PIXEL_DEBUG &&
+        console.log(
+          "[DH Tracking Pixel] Meta Pixel skipped",
+          payload.meta.skip_reason
+        );
 
-    if (payload.meta && payload.meta.skip === true) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel skipped", payload.meta.skip_reason);
-      return;
+      return false;
     }
 
-    if (!metaConfig.enabled || !metaConfig.clientSideEnabled || !pixelId) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel skipped - not enabled");
-      return;
+    if (
+      !metaConfig.enabled ||
+      !metaConfig.clientSideEnabled ||
+      !pixelId
+    ) {
+      DH_PIXEL_DEBUG &&
+        console.log(
+          "[DH Tracking Pixel] Meta Pixel skipped - not enabled"
+        );
+
+      return false;
     }
 
-    if (!isMetaEventSelected(metaConfig, payload.meta_event)) {
-      DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel skipped - event not selected", payload.meta_event);
-      return;
+    if (
+      !isMetaEventSelected(
+        metaConfig,
+        payload.meta_event
+      )
+    ) {
+      DH_PIXEL_DEBUG &&
+        console.log(
+          "[DH Tracking Pixel] Meta Pixel skipped - event not selected",
+          payload.meta_event
+        );
+
+      return false;
     }
 
-    var url = buildMetaPixelUrl(payload, metaConfig);
+    var url =
+      buildMetaPixelUrl(
+        payload,
+        metaConfig
+      );
 
-    fetch(url, {
-      method: "GET",
-      mode: "no-cors",
-      keepalive: true,
-    });
+    var response =
+      await fetch(
+        url,
+        {
+          method: "GET",
+          mode: "cors",
+          credentials: "include",
+          keepalive: true,
+        }
+      );
 
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel sent", payload.meta_event, pixelId, payload.event_id);
+    if (!response.ok) {
+      throw new Error(
+        "Meta Pixel HTTP " +
+        response.status
+      );
+    }
+
+    DH_PIXEL_DEBUG &&
+      console.log(
+        "[DH Tracking Pixel] Meta Pixel browser request accepted",
+        payload.meta_event,
+        pixelId,
+        payload.event_id,
+        response.status
+      );
+
+    return true;
   } catch (e) {
-    DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel] Meta Pixel send error", e);
+    DH_PIXEL_DEBUG &&
+      console.log(
+        "[DH Tracking Pixel] Meta Pixel browser request failed",
+        payload.meta_event,
+        pixelId,
+        payload.event_id,
+        e
+      );
+
+    return false;
   }
 }
 
@@ -2684,7 +2796,12 @@ register(({ analytics, browser, settings }) => {
 
         const clientDeliveries = [];
 
-        sendToMetaPixel(payload, config);
+        const metaPixelDelivery =
+          sendToMetaPixel(
+            payload,
+            config
+          );
+
         const ga4ClientDelivery =
           sendToGa4(payload, config);
 
@@ -2718,11 +2835,14 @@ register(({ analytics, browser, settings }) => {
             clientDeliveries,
         };
 
-        await sendToServer(
-          serverPayload,
-          settings && settings.ingest_key,
-          settings && settings.ingestion_endpoint
-        );
+        await Promise.all([
+          sendToServer(
+            serverPayload,
+            settings && settings.ingest_key,
+            settings && settings.ingestion_endpoint
+          ),
+          metaPixelDelivery,
+        ]);
       } catch (e) {
         DH_PIXEL_DEBUG && console.log("[DH Tracking Pixel Error]", eventName, e);
       }

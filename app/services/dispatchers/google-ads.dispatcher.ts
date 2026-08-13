@@ -29,8 +29,69 @@ function getDeveloperToken() {
   return process.env.GOOGLE_ADS_DEVELOPER_TOKEN || "";
 }
 
-function getLoginCustomerId() {
-  return cleanCustomerId(process.env.GOOGLE_ADS_LOGIN_CUSTOMER_ID || "");
+async function getSelectedGoogleAdsCustomerId(
+  workspaceId: string
+) {
+  /*
+   * The Google Ads account selected in Configuration is the
+   * authoritative destination boundary for this workspace.
+   *
+   * Never infer the destination account from an older conversion
+   * config or from whichever active conversion action happens to
+   * have been updated most recently.
+   */
+  const selection = await db.shopAssetSelection.findUnique({
+    where: {
+      workspaceId_platform_assetType: {
+        workspaceId,
+        platform: "google",
+        assetType:
+          "Google Ads Account / Manager Account",
+      },
+    },
+    select: {
+      assetValue: true,
+    },
+  });
+
+  return cleanCustomerId(
+    selection?.assetValue || ""
+  );
+}
+
+async function getLoginCustomerId(workspaceId: string) {
+  /*
+   * Google Ads login-customer-id belongs to the merchant/workspace,
+   * not to the application globally.
+   *
+   * Direct accounts are stored as "none".
+   * MCC child accounts store the discovered manager customer ID.
+   */
+  const selection = await db.shopAssetSelection.findUnique({
+    where: {
+      workspaceId_platform_assetType: {
+        workspaceId,
+        platform: "google",
+        assetType: "Google Ads Login Customer ID",
+      },
+    },
+    select: {
+      assetValue: true,
+    },
+  });
+
+  const savedValue = String(
+    selection?.assetValue || ""
+  ).trim();
+
+  if (
+    !savedValue ||
+    savedValue.toLowerCase() === "none"
+  ) {
+    return "";
+  }
+
+  return cleanCustomerId(savedValue);
 }
 
 function getServerApiMode() {
@@ -167,101 +228,129 @@ async function findPurchaseConversionAction(
   workspaceId: string,
   conversionActionOverride?: PurchaseConversionActionRecord
 ) {
-  const activeConfig = await db.googleConversionConfig.findFirst({
-    where: {
-      workspaceId,
-      isActive: true,
-      events: {
-        has: "PURCHASE",
-      },
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
-
-  const preferredGoogleAdsCustomerId = cleanCustomerId(
-    activeConfig?.googleAdsCustomerId
-  );
-
-  if (conversionActionOverride) {
-    const googleAdsCustomerId = cleanCustomerId(
-      conversionActionOverride.googleAdsCustomerId || activeConfig?.googleAdsCustomerId
+  /*
+   * The Google Ads customer explicitly selected by this shop is
+   * always the authoritative destination.
+   */
+  const selectedGoogleAdsCustomerId =
+    await getSelectedGoogleAdsCustomerId(
+      workspaceId
     );
 
+  if (!selectedGoogleAdsCustomerId) {
     return {
-      activeConfig,
-      conversionAction: conversionActionOverride,
-      googleAdsCustomerId,
-    };
-  }
-
-  const conversionAction = await db.googleAdsConversionAction.findFirst({
-    where: {
-      workspaceId,
-      eventName: "PURCHASE",
-      isActive: true,
-      deliveryMode: "server",
-      ...(preferredGoogleAdsCustomerId
-        ? { googleAdsCustomerId: preferredGoogleAdsCustomerId }
-        : {}),
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
-
-  if (!conversionAction) {
-    return {
-      activeConfig,
+      activeConfig: null,
       conversionAction: null,
       googleAdsCustomerId: "",
     };
   }
 
-  const googleAdsCustomerId = cleanCustomerId(
-    conversionAction.googleAdsCustomerId || activeConfig?.googleAdsCustomerId
-  );
+  const activeConfig =
+    await db.googleConversionConfig.findFirst({
+      where: {
+        workspaceId,
+        googleAdsCustomerId:
+          selectedGoogleAdsCustomerId,
+        isActive: true,
+      },
+      orderBy: {
+        updatedAt: "desc",
+      },
+    });
+
+  if (conversionActionOverride) {
+    const overrideCustomerId =
+      cleanCustomerId(
+        conversionActionOverride.googleAdsCustomerId
+      );
+
+    if (
+      overrideCustomerId !==
+      selectedGoogleAdsCustomerId
+    ) {
+      return {
+        activeConfig,
+        conversionAction: null,
+        googleAdsCustomerId: "",
+      };
+    }
+
+    return {
+      activeConfig,
+      conversionAction:
+        conversionActionOverride,
+      googleAdsCustomerId:
+        selectedGoogleAdsCustomerId,
+    };
+  }
+
+  const conversionAction =
+    await db.googleAdsConversionAction.findFirst({
+      where: {
+        workspaceId,
+        googleAdsCustomerId:
+          selectedGoogleAdsCustomerId,
+        eventName: "PURCHASE",
+        isActive: true,
+        deliveryMode: "server",
+      },
+      orderBy: {
+        updatedAt: "desc",
+      },
+    });
 
   return {
     activeConfig,
     conversionAction,
-    googleAdsCustomerId,
+    googleAdsCustomerId:
+      conversionAction
+        ? selectedGoogleAdsCustomerId
+        : "",
   };
 }
 
-async function findPurchaseConversionActions(workspaceId: string) {
-  const activeConfig = await db.googleConversionConfig.findFirst({
-    where: {
-      workspaceId,
-      isActive: true,
-      events: {
-        has: "PURCHASE",
+async function findPurchaseConversionActions(
+  workspaceId: string
+) {
+  const selectedGoogleAdsCustomerId =
+    await getSelectedGoogleAdsCustomerId(
+      workspaceId
+    );
+
+  if (!selectedGoogleAdsCustomerId) {
+    return {
+      activeConfig: null,
+      conversionActions: [],
+    };
+  }
+
+  const activeConfig =
+    await db.googleConversionConfig.findFirst({
+      where: {
+        workspaceId,
+        googleAdsCustomerId:
+          selectedGoogleAdsCustomerId,
+        isActive: true,
       },
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
+      orderBy: {
+        updatedAt: "desc",
+      },
+    });
 
-  const preferredGoogleAdsCustomerId = cleanCustomerId(
-    activeConfig?.googleAdsCustomerId
-  );
-
-  const conversionActions = await db.googleAdsConversionAction.findMany({
-    where: {
-      workspaceId,
-      eventName: "PURCHASE",
-      isActive: true,
-      deliveryMode: "server",
-      ...(preferredGoogleAdsCustomerId
-        ? { googleAdsCustomerId: preferredGoogleAdsCustomerId }
-        : {}),
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
+  const conversionActions =
+    await db.googleAdsConversionAction.findMany({
+      where: {
+        workspaceId,
+        googleAdsCustomerId:
+          selectedGoogleAdsCustomerId,
+        eventName: "PURCHASE",
+        isActive: true,
+        deliveryMode: "server",
+      },
+      orderBy: {
+        updatedAt: "desc",
+      },
+    });
 
   return {
     activeConfig,
@@ -356,7 +445,13 @@ async function dispatchPurchaseToGoogleAdsDataManager(
     }
 
     const accessToken = await getGoogleAccessToken(workspaceId);
-    const loginCustomerId = getLoginCustomerId() || googleAdsCustomerId;
+
+    const savedLoginCustomerId =
+      await getLoginCustomerId(workspaceId);
+
+    const loginCustomerId =
+      savedLoginCustomerId ||
+      googleAdsCustomerId;
 
     const adIdentifiers: Record<string, string> = {};
     adIdentifiers[clickIdentifier.field] = clickIdentifier.value;
@@ -560,10 +655,12 @@ async function dispatchPurchaseToGoogleAdsApi(
       "Content-Type": "application/json",
     };
 
-    const loginCustomerId = getLoginCustomerId();
+    const loginCustomerId =
+      await getLoginCustomerId(workspaceId);
 
     if (loginCustomerId) {
-      headers["login-customer-id"] = loginCustomerId;
+      headers["login-customer-id"] =
+        loginCustomerId;
     }
 
     const response = await fetch(endpoint, {

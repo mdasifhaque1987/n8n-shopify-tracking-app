@@ -237,141 +237,964 @@ export async function refreshGoogleToken(
   }
 }
 
+export class GoogleAdsDiscoveryError extends Error {
+  status: number;
+  category: string;
+
+  constructor(
+    message: string,
+    status = 0,
+    category = "google_ads_api_error"
+  ) {
+    super(message);
+    this.name = "GoogleAdsDiscoveryError";
+    this.status = status;
+    this.category = category;
+  }
+}
+
 /**
  * Get Google Ads accounts for a user
  */
 export async function getGoogleAdsAccounts(
-  accessToken: string
+  accessToken: string,
+  cachedAccounts: Array<{
+    value: string;
+    label: string;
+    loginCustomerId?: string;
+    manager?: boolean;
+    status?: string;
+  }> = []
 ): Promise<
   Array<{
     customerId: string;
     descriptiveName: string;
+    manager: boolean;
+    status: string;
+    loginCustomerId?: string;
   }>
 > {
-  const developerToken = process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
-  const apiVersion = process.env.GOOGLE_ADS_API_VERSION || "v24";
+  const developerToken =
+    process.env.GOOGLE_ADS_DEVELOPER_TOKEN;
+
+  const apiVersion =
+    process.env.GOOGLE_ADS_API_VERSION || "v24";
 
   if (!developerToken) {
-    console.warn("GOOGLE_ADS_DEVELOPER_TOKEN is missing");
-    return [];
+    throw new GoogleAdsDiscoveryError(
+      "Google Ads API developer token is not configured.",
+      500,
+      "developer_token_missing"
+    );
   }
 
+  const googleAdsBaseUrl =
+    ["https:", "", "googleads.googleapis.com"]
+      .join("/");
+
+  const getCachedName = (
+    customerId: string,
+    label: string
+  ) => {
+    const genericLabel =
+      `Google Ads Account ${customerId}`;
+
+    const normalizedLabel =
+      String(label || "").trim();
+
+    if (
+      !normalizedLabel ||
+      normalizedLabel === genericLabel
+    ) {
+      return "";
+    }
+
+    const idSuffix =
+      ` (${customerId})`;
+
+    if (
+      normalizedLabel.endsWith(idSuffix)
+    ) {
+      return normalizedLabel
+        .slice(
+          0,
+          normalizedLabel.length -
+            idSuffix.length
+        )
+        .trim();
+    }
+
+    return normalizedLabel;
+  };
+
   try {
+    /*
+     * FIRST STAGE
+     *
+     * Exactly one listAccessibleCustomers operation.
+     */
     const response = await fetch(
-      `https://googleads.googleapis.com/${apiVersion}/customers:listAccessibleCustomers`,
+      `${googleAdsBaseUrl}/${apiVersion}/customers:listAccessibleCustomers`,
       {
         method: "GET",
         headers: {
-          Authorization: `Bearer ${accessToken}`,
-          "developer-token": developerToken,
+          Authorization:
+            `Bearer ${accessToken}`,
+          "developer-token":
+            developerToken,
         },
       }
     );
 
-    const data =
-      (await response.json()) as GoogleAdsAccountsResponse;
+    const data = await response
+      .json()
+      .catch(() => ({})) as {
+        resourceNames?: string[];
+        error?: {
+          message?: string;
+        };
+      };
 
     if (!response.ok) {
-      console.error("Google Ads account discovery failed", {
-        status: response.status,
-        category: "google_ads_api_error",
-      });
+      const category =
+        response.status === 429
+          ? "rate_limited"
+          : response.status === 403
+            ? "permission_denied"
+            : "google_ads_api_error";
+
+      console.warn(
+        "[Google Ads Discovery] listAccessibleCustomers failed",
+        {
+          status: response.status,
+          category,
+        }
+      );
 
       if (response.status === 401) {
         throw createGoogleApiError(
           "Google Ads access token was rejected.",
-          response.status,
+          401,
           data
         );
       }
 
-      return [];
+      if (response.status === 429) {
+        throw new GoogleAdsDiscoveryError(
+          "Google Ads API quota is exhausted. The previously cached account list has been preserved.",
+          429,
+          "rate_limited"
+        );
+      }
+
+      if (response.status === 403) {
+        throw new GoogleAdsDiscoveryError(
+          "Google Ads API access was denied. Check the developer token and Google Ads permissions.",
+          403,
+          "permission_denied"
+        );
+      }
+
+      throw new GoogleAdsDiscoveryError(
+        data?.error?.message ||
+          "Google Ads accounts could not be loaded.",
+        response.status,
+        category
+      );
     }
 
-    const resourceNames: string[] = data.resourceNames || [];
+    const customerIds =
+      Array.from(
+        new Set(
+          (data.resourceNames || [])
+            .map((resourceName) =>
+              String(resourceName || "")
+                .replace(/^customers\//, "")
+                .replace(/-/g, "")
+                .trim()
+            )
+            .filter(Boolean)
+        )
+      ).sort();
 
-    return resourceNames.map((resourceName) => {
-      const customerId = resourceName.replace("customers/", "");
+    console.info(
+      "[Google Ads Discovery] Direct accessible customers",
+      {
+        count: customerIds.length,
+      }
+    );
 
-      return {
+    /*
+     * Reuse previously enriched account information.
+     */
+    const cachedById =
+      new Map(
+        cachedAccounts.map((account) => [
+          String(account.value || "")
+            .replace(/-/g, "")
+            .trim(),
+          account,
+        ])
+      );
+
+    const metadata =
+      new Map<
+        string,
+        {
+          descriptiveName: string;
+          manager: boolean;
+          status: string;
+          loginCustomerId: string;
+        }
+      >();
+
+    for (const customerId of customerIds) {
+      const cached =
+        cachedById.get(customerId);
+
+      if (!cached) {
+        continue;
+      }
+
+      const cachedName =
+        getCachedName(
+          customerId,
+          cached.label
+        );
+
+      if (!cachedName) {
+        continue;
+      }
+
+      metadata.set(
         customerId,
-        descriptiveName: `Google Ads Account ${customerId}`,
-      };
-    });
+        {
+          descriptiveName:
+            cachedName,
+          manager:
+            Boolean(cached.manager),
+          status:
+            String(
+              cached.status ||
+              "ACCESSIBLE"
+            ),
+          loginCustomerId:
+            String(
+              cached.loginCustomerId ||
+              ""
+            ),
+        }
+      );
+    }
+
+    const missingCustomerIds =
+      customerIds.filter(
+        (customerId) =>
+          !metadata.has(customerId)
+      );
+
+    /*
+     * SECOND STAGE - NAME ENRICHMENT
+     *
+     * Only accounts whose human-readable name is missing
+     * are queried.
+     *
+     * Existing cached names are never queried again.
+     *
+     * Limit enrichment per OAuth cycle so a merchant with
+     * hundreds of directly-accessible accounts cannot create
+     * another API request storm.
+     */
+    const nameEnrichmentIds =
+      missingCustomerIds.slice(0, 25);
+
+    console.info(
+      "[Google Ads Discovery] Name enrichment",
+      {
+        accessible:
+          customerIds.length,
+        cached:
+          metadata.size,
+        missing:
+          missingCustomerIds.length,
+        querying:
+          nameEnrichmentIds.length,
+      }
+    );
+
+    for (
+      const customerId of
+      nameEnrichmentIds
+    ) {
+      const detailResponse =
+        await fetch(
+          `${googleAdsBaseUrl}/${apiVersion}/customers/${customerId}/googleAds:search`,
+          {
+            method: "POST",
+            headers: {
+              Authorization:
+                `Bearer ${accessToken}`,
+              "developer-token":
+                developerToken,
+              "Content-Type":
+                "application/json",
+            },
+            body: JSON.stringify({
+              query:
+                "SELECT customer.id, customer.descriptive_name, customer.manager, customer.status FROM customer LIMIT 1",
+            }),
+          }
+        );
+
+      const detailData =
+        await detailResponse
+          .json()
+          .catch(() => ({})) as {
+            results?: Array<{
+              customer?: {
+                id?: string;
+                descriptiveName?: string;
+                manager?: boolean;
+                status?: string;
+              };
+            }>;
+            error?: {
+              message?: string;
+            };
+          };
+
+      if (
+        detailResponse.status === 429
+      ) {
+        console.warn(
+          "[Google Ads Discovery] Name enrichment stopped by quota",
+          {
+            customerId,
+          }
+        );
+
+        /*
+         * Stop immediately. Generic IDs remain usable,
+         * and successful names already collected remain
+         * available for caching.
+         */
+        break;
+      }
+
+      if (
+        detailResponse.status === 401
+      ) {
+        throw createGoogleApiError(
+          "Google Ads access token was rejected while loading account names.",
+          401,
+          detailData
+        );
+      }
+
+      if (!detailResponse.ok) {
+        console.warn(
+          "[Google Ads Discovery] Account name unavailable",
+          {
+            customerId,
+            status:
+              detailResponse.status,
+          }
+        );
+
+        continue;
+      }
+
+      const customer =
+        detailData.results?.[0]
+          ?.customer;
+
+      const descriptiveName =
+        String(
+          customer?.descriptiveName ||
+          ""
+        ).trim();
+
+      if (!descriptiveName) {
+        continue;
+      }
+
+      metadata.set(
+        customerId,
+        {
+          descriptiveName,
+          manager:
+            Boolean(
+              customer?.manager
+            ),
+          status:
+            String(
+              customer?.status ||
+              "ACCESSIBLE"
+            ),
+          loginCustomerId:
+            "",
+        }
+      );
+    }
+
+    return customerIds.map(
+      (customerId) => {
+        const detail =
+          metadata.get(customerId);
+
+        return {
+          customerId,
+
+          descriptiveName:
+            detail?.descriptiveName ||
+            `Google Ads Account ${customerId}`,
+
+          manager:
+            detail?.manager ??
+            false,
+
+          status:
+            detail?.status ||
+            "ACCESSIBLE",
+
+          loginCustomerId:
+            detail?.loginCustomerId ||
+            "",
+        };
+      }
+    );
   } catch (error) {
-    if (getGoogleApiErrorStatus(error) === 401) {
+    if (
+      error instanceof
+        GoogleAdsDiscoveryError ||
+      getGoogleApiErrorStatus(error) === 401
+    ) {
       throw error;
     }
 
-    console.error("Error getting Google Ads accounts:", error instanceof Error ? error.name : "UnknownError");
-    return [];
+    console.error(
+      "[Google Ads Discovery] Unexpected failure",
+      {
+        errorName:
+          error instanceof Error
+            ? error.name
+            : "UnknownError",
+      }
+    );
+
+    throw new GoogleAdsDiscoveryError(
+      "Google Ads accounts could not be loaded.",
+      0,
+      "google_ads_api_error"
+    );
   }
 }
 
+
 export async function getMerchantCenters(
-  accessToken: string
+  accessToken: string,
+  cachedCenters: Array<{
+    value: string;
+    label: string;
+  }> = []
 ): Promise<
   Array<{
     merchantId: string;
     name: string;
   }>
 > {
+  const merchantApiBaseUrl =
+    [
+      "https:",
+      "",
+      "merchantapi.googleapis.com",
+    ].join("/");
+
+  const contentApiBaseUrl =
+    [
+      "https:",
+      "",
+      "shoppingcontent.googleapis.com",
+    ].join("/");
+
+  const getCachedMerchantName = (
+    merchantId: string
+  ) => {
+    const cached =
+      cachedCenters.find(
+        (account) =>
+          String(
+            account.value || ""
+          ).trim() === merchantId
+      );
+
+    const label =
+      String(
+        cached?.label || ""
+      ).trim();
+
+    if (!label) {
+      return "";
+    }
+
+    const genericName =
+      `Merchant Center ${merchantId}`;
+
+    const genericLabel =
+      `${genericName} (${merchantId})`;
+
+    if (
+      label === genericName ||
+      label === genericLabel
+    ) {
+      return "";
+    }
+
+    const suffix =
+      ` (${merchantId})`;
+
+    if (label.endsWith(suffix)) {
+      return label
+        .slice(
+          0,
+          label.length -
+            suffix.length
+        )
+        .trim();
+    }
+
+    return label;
+  };
+
+
+  /*
+   * PRIMARY:
+   * Current Merchant API.
+   */
   try {
-    const response = await fetch(
-      "https://shoppingcontent.googleapis.com/content/v2.1/accounts/authinfo",
-      {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      }
-    );
+    const accounts: Array<{
+      merchantId: string;
+      name: string;
+    }> = [];
 
-    const data =
-      (await response.json()) as MerchantCentersResponse;
+    let pageToken = "";
 
-    if (!response.ok) {
-      console.error("Merchant Center discovery failed", {
-        status: response.status,
-        category: "merchant_center_api_error",
-      });
+    for (
+      let page = 0;
+      page < 10;
+      page += 1
+    ) {
+      const params =
+        new URLSearchParams();
 
-      if (response.status === 401) {
-        throw createGoogleApiError(
-          "Merchant Center access token was rejected.",
-          response.status,
-          data
+      params.set(
+        "pageSize",
+        "500"
+      );
+
+      if (pageToken) {
+        params.set(
+          "pageToken",
+          pageToken
         );
       }
+
+      const response =
+        await fetch(
+          `${merchantApiBaseUrl}/accounts/v1/accounts?${params.toString()}`,
+          {
+            method: "GET",
+            headers: {
+              Authorization:
+                `Bearer ${accessToken}`,
+            },
+          }
+        );
+
+      const data =
+        await response
+          .json()
+          .catch(() => ({})) as {
+            accounts?: Array<{
+              name?: string;
+              accountId?: string;
+              accountName?: string;
+            }>;
+            nextPageToken?: string;
+          };
+
+      if (!response.ok) {
+        if (
+          response.status === 401
+        ) {
+          throw createGoogleApiError(
+            "Merchant Center access token was rejected.",
+            response.status,
+            data
+          );
+        }
+
+        console.warn(
+          "[Merchant Center Discovery] Merchant API unavailable; using compatibility fallback",
+          {
+            status:
+              response.status,
+          }
+        );
+
+        break;
+      }
+
+      for (
+        const account of
+        data.accounts || []
+      ) {
+        const merchantId =
+          String(
+            account.accountId ||
+            account.name
+              ?.replace(
+                /^accounts\//,
+                ""
+              ) ||
+            ""
+          ).trim();
+
+        if (!merchantId) {
+          continue;
+        }
+
+        const accountName =
+          String(
+            account.accountName ||
+            ""
+          ).trim();
+
+        accounts.push({
+          merchantId,
+          name:
+            accountName ||
+            getCachedMerchantName(
+              merchantId
+            ) ||
+            `Merchant Center ${merchantId}`,
+        });
+      }
+
+      pageToken =
+        String(
+          data.nextPageToken ||
+          ""
+        );
+
+      if (!pageToken) {
+        break;
+      }
+    }
+
+    if (accounts.length > 0) {
+      const unique =
+        Array.from(
+          new Map(
+            accounts.map(
+              (account) => [
+                account.merchantId,
+                account,
+              ]
+            )
+          ).values()
+        );
+
+      console.info(
+        "[Merchant Center Discovery] Merchant API completed",
+        {
+          accounts:
+            unique.length,
+        }
+      );
+
+      return unique;
+    }
+  } catch (error) {
+    if (
+      getGoogleApiErrorStatus(
+        error
+      ) === 401
+    ) {
+      throw error;
+    }
+
+    console.warn(
+      "[Merchant Center Discovery] Merchant API failed; using compatibility fallback",
+      {
+        errorName:
+          error instanceof Error
+            ? error.name
+            : "UnknownError",
+      }
+    );
+  }
+
+
+  /*
+   * COMPATIBILITY FALLBACK:
+   *
+   * Individual:
+   *   merchantId only
+   *
+   * Advanced account:
+   *   aggregatorId only
+   *
+   * Subaccount:
+   *   merchantId + aggregatorId
+   *
+   * accounts.get needs:
+   *
+   *   managingAccountId
+   *   accountId
+   */
+  try {
+    const authResponse =
+      await fetch(
+        `${contentApiBaseUrl}/content/v2.1/accounts/authinfo`,
+        {
+          method: "GET",
+          headers: {
+            Authorization:
+              `Bearer ${accessToken}`,
+          },
+        }
+      );
+
+    const authData =
+      await authResponse
+        .json()
+        .catch(() => ({})) as
+        MerchantCentersResponse;
+
+    if (!authResponse.ok) {
+      if (
+        authResponse.status === 401
+      ) {
+        throw createGoogleApiError(
+          "Merchant Center access token was rejected.",
+          authResponse.status,
+          authData
+        );
+      }
+
+      console.warn(
+        "[Merchant Center Discovery] authinfo failed",
+        {
+          status:
+            authResponse.status,
+        }
+      );
 
       return [];
     }
 
-    const accountIdentifiers = data.accountIdentifiers || [];
+    const identifiers =
+      authData.accountIdentifiers ||
+      [];
 
-    return accountIdentifiers
-      .map((account) => {
-        const merchantId =
-          account.merchantId ||
-          account.aggregatorId ||
-          account.accountId ||
-          "";
+    const resolved: Array<{
+      merchantId: string;
+      name: string;
+    }> = [];
 
-        return {
-          merchantId: String(merchantId),
-          name: `Merchant Center ${merchantId}`,
-        };
-      })
-      .filter((account: { merchantId: string }) => account.merchantId);
+    let cachedCount = 0;
+    let enrichedCount = 0;
+    let unresolvedCount = 0;
+
+    for (
+      const identifier of
+      identifiers
+    ) {
+      const merchantId =
+        String(
+          identifier.merchantId ||
+          ""
+        ).trim();
+
+      const aggregatorId =
+        String(
+          identifier.aggregatorId ||
+          ""
+        ).trim();
+
+      /*
+       * Individual:
+       *
+       * merchantId = account
+       * managing ID = merchantId
+       *
+       * Advanced account:
+       *
+       * aggregatorId = account
+       * managing ID = aggregatorId
+       *
+       * Subaccount:
+       *
+       * merchantId = subaccount
+       * aggregatorId = managing advanced account
+       */
+      const accountId =
+        merchantId ||
+        aggregatorId;
+
+      /*
+       * Use the account itself first.
+       *
+       * This is the lookup pattern that already resolved all
+       * 16 accessible Merchant Center account names
+       * successfully in production.
+       *
+       * Using aggregatorId first caused 401 responses for
+       * accounts that were otherwise directly readable.
+       */
+      const managingAccountId =
+        accountId;
+
+      if (
+        !accountId ||
+        !managingAccountId
+      ) {
+        continue;
+      }
+
+      let accountName =
+        getCachedMerchantName(
+          accountId
+        );
+
+      if (accountName) {
+        cachedCount += 1;
+      } else {
+        try {
+          const detailUrl =
+            `${contentApiBaseUrl}/content/v2.1/${managingAccountId}/accounts/${accountId}?view=merchant`;
+
+          const detailResponse =
+            await fetch(
+              detailUrl,
+              {
+                method: "GET",
+                headers: {
+                  Authorization:
+                    `Bearer ${accessToken}`,
+                },
+              }
+            );
+
+          const detailData =
+            await detailResponse
+              .json()
+              .catch(() => ({})) as {
+                id?: string;
+                name?: string;
+              };
+
+          const detailName =
+            String(
+              detailData.name ||
+              ""
+            ).trim();
+
+          if (
+            detailResponse.ok &&
+            detailName
+          ) {
+            accountName =
+              detailName;
+
+            enrichedCount += 1;
+
+            console.info(
+              "[Merchant Center Discovery] Account name resolved",
+              {
+                accountId,
+                managingAccountId,
+              }
+            );
+          } else {
+            unresolvedCount += 1;
+
+            console.warn(
+              "[Merchant Center Discovery] Account name unavailable",
+              {
+                accountId,
+                managingAccountId,
+                status:
+                  detailResponse.status,
+              }
+            );
+          }
+        } catch (error) {
+          unresolvedCount += 1;
+
+          console.warn(
+            "[Merchant Center Discovery] Account name request failed",
+            {
+              accountId,
+              managingAccountId,
+              errorName:
+                error instanceof Error
+                  ? error.name
+                  : "UnknownError",
+            }
+          );
+        }
+      }
+
+      resolved.push({
+        merchantId:
+          accountId,
+
+        name:
+          accountName ||
+          `Merchant Center ${accountId}`,
+      });
+    }
+
+    console.info(
+      "[Merchant Center Discovery] Name enrichment completed",
+      {
+        accessible:
+          resolved.length,
+        cached:
+          cachedCount,
+        enriched:
+          enrichedCount,
+        unresolved:
+          unresolvedCount,
+      }
+    );
+
+    return resolved;
   } catch (error) {
-    if (getGoogleApiErrorStatus(error) === 401) {
+    if (
+      getGoogleApiErrorStatus(
+        error
+      ) === 401
+    ) {
       throw error;
     }
 
-    console.error("Error getting Merchant Centers:", error instanceof Error ? error.name : "UnknownError");
+    console.error(
+      "[Merchant Center Discovery] Fallback failed",
+      {
+        errorName:
+          error instanceof Error
+            ? error.name
+            : "UnknownError",
+      }
+    );
+
     return [];
   }
 }
+
 
 /**
  * Get Google Analytics properties

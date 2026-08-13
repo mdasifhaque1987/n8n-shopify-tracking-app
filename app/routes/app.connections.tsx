@@ -8,6 +8,7 @@ import {
 } from "../services/platform-connection.server";
 import { getTestModeSettings } from "../services/test-mode.server";
 import { getShopSubscription } from "../services/subscription.server";
+import db from "../db.server";
 import SubscriptionButton from "../components/SubscriptionButton";
 
 export async function loader({ request }: LoaderFunctionArgs) {
@@ -61,12 +62,57 @@ export async function loader({ request }: LoaderFunctionArgs) {
 
 export async function action({ request }: ActionFunctionArgs) {
   const { session } = await authenticate.admin(request);
+  const workspace = await getOrCreateShopWorkspace(session.shop);
 
   const formData = await request.formData();
   const connectionId = String(formData.get("connectionId") || "");
 
   if (connectionId) {
-    await deactivateConnection(connectionId);
+    const connection = await db.platformConnection.findFirst({
+      where: {
+        id: connectionId,
+        workspaceId: workspace.id,
+      },
+      select: {
+        id: true,
+        platform: true,
+      },
+    });
+
+    if (connection) {
+      await deactivateConnection(connection.id);
+
+      const normalizedPlatform =
+        String(connection.platform || "")
+          .toUpperCase();
+
+      const assetPlatform =
+        normalizedPlatform === "GOOGLE_ADS" ||
+        normalizedPlatform === "GOOGLE"
+          ? "google"
+          : normalizedPlatform === "META"
+            ? "meta"
+            : normalizedPlatform === "TIKTOK"
+              ? "tiktok"
+              : normalizedPlatform === "PINTEREST"
+                ? "pinterest"
+                : normalizedPlatform ===
+                    "MICROSOFT_ADS"
+                  ? "microsoft"
+                  : normalizedPlatform ===
+                      "LINKEDIN"
+                    ? "linkedin"
+                    : null;
+
+      if (assetPlatform) {
+        await db.shopAssetSelection.deleteMany({
+          where: {
+            workspaceId: workspace.id,
+            platform: assetPlatform,
+          },
+        });
+      }
+    }
   }
 
   return redirect(`/app/connections?shop=${encodeURIComponent(session.shop)}`);
@@ -250,7 +296,11 @@ export default function ConnectionsPage() {
           gap: 16,
         }}
       >
-        {platforms.map((platform) => {
+        {platforms
+          .filter((platform) =>
+            ["google", "meta"].includes(platform.id)
+          )
+          .map((platform) => {
           const connection = connections[platform.id as keyof typeof connections];
           const isConnected = connection?.connected;
 

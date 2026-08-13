@@ -31,7 +31,12 @@ export async function saveAssetSelection(data: {
 
 export async function getAssetSelections(workspaceId: string) {
   const rows = await db.shopAssetSelection.findMany({
-    where: { workspaceId },
+    where: {
+      workspaceId,
+      platform: {
+        not: "google_cache",
+      },
+    },
   });
 
   const selections: Record<string, string> = {};
@@ -45,7 +50,12 @@ export async function getAssetSelections(workspaceId: string) {
 
 export async function getAssetSelectionLabels(workspaceId: string) {
   const rows = await db.shopAssetSelection.findMany({
-    where: { workspaceId },
+    where: {
+      workspaceId,
+      platform: {
+        not: "google_cache",
+      },
+    },
     select: {
       platform: true,
       assetType: true,

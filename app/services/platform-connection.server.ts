@@ -218,19 +218,5 @@ export async function getGooglePlatformConnection(workspaceId: string) {
     return workspaceGoogleConnection;
   }
 
-  const activeConnections = await db.platformConnection.findMany({
-    where: {
-      isActive: true,
-    },
-    orderBy: {
-      updatedAt: "desc",
-    },
-  });
-
-  return (
-    activeConnections.find(
-      (connection: (typeof activeConnections)[number]) =>
-        isGooglePlatform(connection.platform)
-    ) || null
-  );
+  return null;
 }
