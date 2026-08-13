@@ -45,6 +45,7 @@ COPY --from=builder --chown=remix:nodejs /app/build ./build
 COPY --from=builder --chown=remix:nodejs /app/package.json ./package.json
 COPY --from=builder --chown=remix:nodejs /app/server.js ./server.js
 COPY --from=deps --chown=remix:nodejs /app/node_modules ./node_modules
+COPY --from=builder --chown=remix:nodejs /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder --chown=remix:nodejs /app/prisma ./prisma
 
 # Switch to non-root user
