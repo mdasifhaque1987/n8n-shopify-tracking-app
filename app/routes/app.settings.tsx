@@ -3576,21 +3576,6 @@ export default function ConfigurationPage() {
 
                       <div
                         style={{
-                          padding: "10px 12px",
-                          border: "1px solid #fde68a",
-                          borderRadius: 10,
-                          background: "#fffbeb",
-                          color: "#92400e",
-                          fontWeight: 700,
-                          lineHeight: 1.6,
-                        }}
-                      >
-                        Meta Catalog setup is disabled for now because Meta rejected the catalog_management OAuth permission.
-                        Enable or approve catalog_management in Meta Developer settings before catalog creation and catalog sync.
-                      </div>
-
-                      <div
-                        style={{
                           display: "grid",
                           gridTemplateColumns: "1fr 1fr",
                           gap: 10,
@@ -3607,9 +3592,6 @@ export default function ConfigurationPage() {
                         </div>
                         <div>
                           <strong>Selected Events:</strong> {metaSelectedEvents.length}
-                        </div>
-                        <div>
-                          <strong>Catalog Status:</strong> Permission required
                         </div>
                         <div>
                           <strong>Content ID Format:</strong> {metaContentIdFormat}
@@ -3989,19 +3971,6 @@ export default function ConfigurationPage() {
                               >
                                 <div
                                   style={{
-                                    padding: "10px 12px",
-                                    border: "1px solid #fde68a",
-                                    borderRadius: 10,
-                                    background: "#fffbeb",
-                                    color: "#92400e",
-                                    fontWeight: 700,
-                                  }}
-                                >
-                                  Meta Catalog setup is disabled for now because Meta rejected the catalog_management OAuth permission. Enable or approve catalog_management in Meta Developer settings before catalog creation and catalog sync.
-                                </div>
-
-                                <div
-                                  style={{
                                     display: "grid",
                                     gridTemplateColumns: "1fr 1fr",
                                     gap: 10,
@@ -4015,9 +3984,6 @@ export default function ConfigurationPage() {
                                   </div>
                                   <div>
                                     <strong>Selected Events:</strong> {metaSelectedEvents.length}
-                                  </div>
-                                  <div>
-                                    <strong>Catalog Status:</strong> Permission required
                                   </div>
                                 </div>
                               </div>

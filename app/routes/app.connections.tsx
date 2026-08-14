@@ -253,41 +253,39 @@ export default function ConnectionsPage() {
         />
       </div>
 
-      <div
-        style={{
-          border: customerEnrichment.enabled ? "1px solid #bbf7d0" : "1px solid #fed7aa",
-          borderRadius: 8,
-          padding: 16,
-          marginBottom: 24,
-          backgroundColor: customerEnrichment.enabled ? "#f0fdf4" : "#fff7ed",
-        }}
-      >
-        <h3
+      {customerEnrichment.enabled && (
+        <div
           style={{
-            margin: "0 0 8px",
-            color: customerEnrichment.enabled ? "#166534" : "#c2410c",
+            border: "1px solid #bbf7d0",
+            borderRadius: 8,
+            padding: 16,
+            marginBottom: 24,
+            backgroundColor: "#f0fdf4",
           }}
         >
-          {customerEnrichment.enabled
-            ? "✅ Customer enrichment enabled"
-            : "⚠️ Customer enrichment disabled"}
-        </h3>
+          <h3
+            style={{
+              margin: "0 0 8px",
+              color: "#166534",
+            }}
+          >
+            ✅ Customer enrichment enabled
+          </h3>
 
-        <p
-          style={{
-            margin: "0 0 8px",
-            color: customerEnrichment.enabled ? "#166534" : "#9a3412",
-          }}
-        >
-          {customerEnrichment.enabled
-            ? "Shopify order customer enrichment is enabled. Purchase events can be enriched server-side with customer email, phone, name, and address when Shopify allows access."
-            : "Shopify order customer enrichment is disabled until Protected Customer Data access is approved by Shopify."}
-        </p>
+          <p
+            style={{
+              margin: "0 0 8px",
+              color: "#166534",
+            }}
+          >
+            Shopify order customer enrichment is enabled. Purchase events can be enriched server-side with customer email, phone, name, and address when Shopify allows access.
+          </p>
 
-        <p style={{ margin: 0, color: "#4b5563" }}>
-          Google Ads Data Manager purchase sending still works using click ID attribution and ecommerce data.
-        </p>
-      </div>
+          <p style={{ margin: 0, color: "#4b5563" }}>
+            Google Ads Data Manager purchase sending still works using click ID attribution and ecommerce data.
+          </p>
+        </div>
+      )}
 
       <div
         style={{
@@ -400,14 +398,6 @@ export default function ConnectionsPage() {
         })}
       </div>
 
-      <div style={styles.notice}>
-        <h3 style={{ marginTop: 0, color: "#c2410c" }}>🔐 OAuth Authentication</h3>
-
-        <p style={{ marginBottom: 0, color: "#9a3412" }}>
-          Clicking Connect or Reconnect opens a new tab to authenticate with the platform.
-          After successful authentication, you will be redirected back to the Shopify app.
-        </p>
-      </div>
     </main>
   );
 }
