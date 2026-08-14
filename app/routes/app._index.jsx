@@ -172,19 +172,6 @@ export default function HomePage() {
         ))}
       </section>
 
-      <section style={{
-        padding: 18,
-        borderRadius: 12,
-        background: "#fff7ed",
-        border: "1px solid #fed7aa"
-      }}>
-        <h3 style={{ marginTop: 0, color: "#c2410c" }}>Protected Customer Data Notice</h3>
-        <p style={{ margin: 0, color: "#9a3412", lineHeight: 1.6 }}>
-          Google Data Manager purchase sending works with click ID attribution and ecommerce data.
-          Customer enrichment from Shopify order data will stay disabled until Shopify approves
-          Protected Customer Data access for this app.
-        </p>
-      </section>
     </main>
   );
 }
